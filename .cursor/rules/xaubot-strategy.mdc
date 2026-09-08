@@ -1,0 +1,31 @@
+---
+description: xaubot strategy memory — keep STRATEGY.md and MEMORY.md in sync
+alwaysApply: true
+---
+
+# xaubot strategy memory
+
+This project copies `gold_trades` signals from Supabase (`pcieshmxxwplaodkrqet`) into MT5 (local or Windows VPS).
+
+Current rules (2026-09-08):
+
+- Poll every `POLL_SEC` seconds (default 5). Immediate scan on startup.
+- New signal = `status=open` and `mt5_ticket` is null. Market order only: long=BUY, short=SELL.
+- Guards before open: `MAX_AGE_SEC`, `MAX_SLIP_USD`, `MAX_OPEN`, broker stops distance, optional `DRY_RUN`.
+- Claim `copied_at` (null-only) before send to avoid double-open.
+- SL/TP from the row. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
+- After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price` (do not overwrite journal `entry`). On failure write `mt5_error` and clear claim.
+- Each poll sync open tickets: floating in `mt5_profit`; if closed in MT5 set `closed` + `mt5_close_*` / `mt5_profit` and classic exit/pips/usd_0_3.
+- After connect/ensure: auto-enable MT5 Algo Trading toolbar if it is off.
+- Do not generate signals. Do not filter by `color`. Do not size lots by risk. Do not trail/lock/partial-close yet.
+- Each trading day write Gann grids to `gann_levels`. Do not open trades from those rows.
+
+## When the strategy changes
+
+If the user changes, improves, or asks to change entry/exit, scan timing, lot, symbol, filters, or sync behavior, update **all three** in the same turn:
+
+1. [STRATEGY.md](STRATEGY.md) — full rules + a dated changelog line
+2. [MEMORY.md](MEMORY.md) — the "מצב נוכחי" snapshot
+3. This rule — the "Current rules" bullets if execution rules changed
+
+Do not leave these files stale after a strategy edit.

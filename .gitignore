@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.pyc
+.python-version
+sessions/mt5.json
+sessions/**/*.json
+!sessions/.gitkeep
+bot.log
+*.log

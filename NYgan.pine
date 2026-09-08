@@ -1,0 +1,316 @@
+
+// ============================================================
+// NY Gann - Gann Numerical Levels for Gold (XAUUSD)
+// Base price = New York session OPEN of the current day
+// (default 08:30 NY = COMEX open = 15:30 Israel time).
+// Levels are drawn ONLY during the NY session (open -> close).
+// Outside the session the indicator draws nothing, so it can
+// sit next to the regular "prev daily close" indicator.
+// ============================================================
+//@version=5
+indicator(title="NY Gann - Gold Levels",
+          shorttitle="NY Gann",
+          overlay=true,
+          max_lines_count=500)
+
+
+// ─────────────────────────────────────────────
+// إعدادات المستخدم
+// ─────────────────────────────────────────────
+group_base  = "NY Open Base"
+group_sq9   = "مربع التسعة (Square of 9)"
+group_8ths  = "الأثمان (Eighths)"
+group_style = "إعدادات العرض"
+
+ny_hour     = input.int(8,  "NY open hour (New York time)",   minval=0, maxval=23, group=group_base,
+     tooltip="08:30 NY = COMEX gold open (15:30 Israel). 09:30 NY = US stocks open (16:30 Israel).")
+ny_minute   = input.int(30, "NY open minute",                 minval=0, maxval=59, group=group_base)
+ny_end_hour = input.int(17, "NY session end hour (New York time)", minval=0, maxval=23, group=group_base,
+     tooltip="Levels are hidden after this time. 17:00 NY = 00:00 Israel (spot daily close). 13:30 NY = COMEX settle.")
+ny_end_min  = input.int(0,  "NY session end minute",          minval=0, maxval=59, group=group_base)
+
+show_sq9    = input.bool(true,  "إظهار مستويات مربع التسعة", group=group_sq9)
+sq9_step    = input.float(0.25, "الخطوة (0.25 = ربع دورة)", minval=0.125, step=0.125, group=group_sq9)
+sq9_levels  = input.int(4,     "عدد المستويات لأعلى/أسفل", minval=1, maxval=8, group=group_sq9)
+
+show_8ths   = input.bool(true,  "إظهار مستويات الأثمان", group=group_8ths)
+eighth_mode = input.string("Fixed", "Eighths range mode", options=["Fixed", "Prev day range", "ATR x"], group=group_8ths)
+eighth_range= input.float(150.0,"نطاق الأثمان (بالدولار) - Fixed mode", minval=50, step=50, group=group_8ths)
+eighth_atr_m= input.float(0.75, "ATR multiplier (auto mode)", minval=0.1, step=0.05, group=group_8ths)
+
+show_labels = input.bool(true,  "إظهار التسميات", group=group_style)
+show_prev   = input.bool(true,  "Show base line (NY open)", group=group_style)
+
+col_up_sq9  = input.color(color.new(#00E5FF, 0),   "لون مستويات الصعود (مربع 9)",  group=group_style)
+col_dn_sq9  = input.color(color.new(#FF4081, 0),   "لون مستويات الهبوط (مربع 9)",  group=group_style)
+col_8th     = input.color(color.new(#FFD700, 60),  "لون الأثمان",                  group=group_style)
+col_prev    = input.color(color.new(#FFFFFF, 20),  "Base line color",              group=group_style)
+
+// ─────────────────────────────────────────────
+// Base price = NY session open of the current day
+// Detected on the chart's own bars: the first bar whose
+// NY-time is >= the configured open time is the open bar.
+// Its OPEN price becomes the base. Locks at the open with
+// no repainting. Works on any intraday timeframe.
+// Levels are only shown while inside the NY session window.
+// ─────────────────────────────────────────────
+ny_min_now  = hour(time, "America/New_York") * 60 + minute(time, "America/New_York")
+ny_min_open = ny_hour * 60 + ny_minute
+ny_min_end  = ny_end_hour * 60 + ny_end_min
+new_ny_day  = ta.change(dayofmonth(time, "America/New_York")) != 0
+
+// The NY open bar: first bar at/after the open time within the NY day
+var bool  opened_today = false
+var float ny_open      = na
+if new_ny_day
+    opened_today := false
+if not opened_today and ny_min_now >= ny_min_open
+    ny_open      := open
+    opened_today := true
+
+// Inside the NY session window? (open <= now < end)
+in_ny = opened_today and ny_min_now >= ny_min_open and ny_min_now < ny_min_end
+
+// Base for the grid: NY open inside the session, na (nothing drawn) outside
+prev_close = in_ny ? ny_open : na
+base_label = "NY Open"
+
+// ─────────────────────────────────────────────
+// مربع التسعة - Square of 9
+// المعادلة: (√price ± step)²
+// ─────────────────────────────────────────────
+sq9_base = math.sqrt(prev_close)
+
+// مستويات الصعود
+sq9_u1 = math.pow(sq9_base + sq9_step * 1, 2)
+sq9_u2 = math.pow(sq9_base + sq9_step * 2, 2)
+sq9_u3 = math.pow(sq9_base + sq9_step * 3, 2)
+sq9_u4 = math.pow(sq9_base + sq9_step * 4, 2)
+sq9_u5 = math.pow(sq9_base + sq9_step * 5, 2)
+sq9_u6 = math.pow(sq9_base + sq9_step * 6, 2)
+sq9_u7 = math.pow(sq9_base + sq9_step * 7, 2)
+sq9_u8 = math.pow(sq9_base + sq9_step * 8, 2)
+
+// مستويات الهبوط
+sq9_d1 = math.pow(sq9_base - sq9_step * 1, 2)
+sq9_d2 = math.pow(sq9_base - sq9_step * 2, 2)
+sq9_d3 = math.pow(sq9_base - sq9_step * 3, 2)
+sq9_d4 = math.pow(sq9_base - sq9_step * 4, 2)
+sq9_d5 = math.pow(sq9_base - sq9_step * 5, 2)
+sq9_d6 = math.pow(sq9_base - sq9_step * 6, 2)
+sq9_d7 = math.pow(sq9_base - sq9_step * 7, 2)
+sq9_d8 = math.pow(sq9_base - sq9_step * 8, 2)
+
+// ─────────────────────────────────────────────
+// الأثمان - Eighths
+// المعادلة: prev_close ± (range / 8) × n
+// ─────────────────────────────────────────────
+// Effective range: Fixed / Prev day range / ATR x (no repaint,
+// uses completed prev-day data), rounded to nearest 50 USD
+d_high  = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+d_low   = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_on)
+d_atr14 = request.security(syminfo.tickerid, "D", ta.atr(14)[1], lookahead=barmerge.lookahead_on)
+
+e_raw  = eighth_mode == "Fixed" ? eighth_range : eighth_mode == "Prev day range" ? d_high - d_low : d_atr14 * eighth_atr_m
+e_rng  = math.max(50.0, math.round(nz(e_raw, eighth_range) / 50) * 50)
+eighth = e_rng / 8
+
+eighth_u1 = prev_close + eighth * 1
+eighth_u2 = prev_close + eighth * 2
+eighth_u3 = prev_close + eighth * 3
+eighth_u4 = prev_close + eighth * 4
+
+eighth_d1 = prev_close - eighth * 1
+eighth_d2 = prev_close - eighth * 2
+eighth_d3 = prev_close - eighth * 3
+eighth_d4 = prev_close - eighth * 4
+
+// ─────────────────────────────────────────────
+// Drawing: one horizontal segment per level per session.
+// Segments start at the NY open bar and extend bar by bar
+// until the session end. Nothing connects one session to
+// the next - each day is a clean, isolated block.
+// ─────────────────────────────────────────────
+max_sessions = input.int(10, "Sessions to keep on chart", minval=1, maxval=50, group=group_style)
+w_sq9        = input.int(2,  "SQ9 line width",         minval=1, maxval=5, group=group_style)
+w_8th        = input.int(3,  "Eighths line width",     minval=1, maxval=5, group=group_style)
+w_base       = input.int(3,  "Base line width",        minval=1, maxval=5, group=group_style)
+
+// Line handles for the CURRENT session (25 = base + 8 up + 8 down + 4 up 8ths + 4 down 8ths)
+var line[] cur = array.new_line(25, line(na))
+var int    ses_start = na
+
+f_lvl(int i) =>
+    // returns the price of level slot i (na if not shown)
+    float v = na
+    if i == 0
+        v := show_prev ? prev_close : na
+    else if i <= 8
+        v := show_sq9 and sq9_levels >= i ? math.pow(sq9_base + sq9_step * i, 2) : na
+    else if i <= 16
+        k = i - 8
+        v := show_sq9 and sq9_levels >= k ? math.pow(sq9_base - sq9_step * k, 2) : na
+    else if i <= 20
+        k = i - 16
+        v := show_8ths ? prev_close + eighth * k : na
+    else
+        k = i - 20
+        v := show_8ths ? prev_close - eighth * k : na
+    v
+
+f_col(int i) =>
+    i == 0 ? col_prev : i <= 8 ? col_up_sq9 : i <= 16 ? col_dn_sq9 : (i == 20 or i == 24) ? color.new(#FFD700, 0) : col_8th
+
+f_width(int i) =>
+    // base / SQ9 (levels 3-4 and 8 one step thicker) / eighths (4/8 one step thicker)
+    i == 0 ? w_base :
+     i <= 16 ? ((i == 3 or i == 4 or i == 8 or i == 11 or i == 12 or i == 16) ? w_sq9 + 1 : w_sq9) :
+     ((i == 20 or i == 24) ? w_8th + 1 : w_8th)
+
+f_style(int i) =>
+    i >= 17 ? line.style_dashed : line.style_solid
+
+// New session: create fresh lines anchored at this bar
+session_start = in_ny and not in_ny[1]
+if session_start
+    ses_start := bar_index
+    for i = 0 to 24
+        v = f_lvl(i)
+        array.set(cur, i, na(v) ? na : line.new(bar_index, v, bar_index, v,
+             color=f_col(i), width=f_width(i), style=f_style(i)))
+
+// Inside session: extend current lines to this bar
+if in_ny and not na(ses_start)
+    for i = 0 to 24
+        ln = array.get(cur, i)
+        if not na(ln)
+            line.set_x2(ln, bar_index)
+
+// Housekeeping: drop lines older than max_sessions
+var line[] all_lines = array.new_line()
+if session_start
+    for i = 0 to 24
+        ln = array.get(cur, i)
+        if not na(ln)
+            array.push(all_lines, ln)
+    while array.size(all_lines) > max_sessions * 25
+        line.delete(array.shift(all_lines))
+
+// ─────────────────────────────────────────────
+// جدول المستويات
+// ─────────────────────────────────────────────
+var table info_table = table.new(
+     position.top_right, 3, 20,
+     bgcolor=color.new(#1a1a2e, 10),
+     border_color=color.new(#FFD700, 40),
+     border_width=1,
+     frame_color=color.new(#FFD700, 20),
+     frame_width=2)
+
+f_cell(col, row, txt, bg, fg) =>
+    table.cell(info_table, col, row, txt,
+               bgcolor=bg, text_color=fg,
+               text_size=size.small,
+               text_halign=text.align_center)
+
+if barstate.islast and show_labels
+    f_cell(0, 0,  "Level",         color.new(#FFD700, 20), #FFD700)
+    f_cell(1, 0,  "Price",         color.new(#FFD700, 20), #FFD700)
+    f_cell(2, 0,  "Type",          color.new(#FFD700, 20), #FFD700)
+
+    f_cell(0, 1,  base_label,      color.new(#ffffff, 70), #ffffff)
+    f_cell(1, 1,  in_ny ? str.tostring(math.round(prev_close, 2)) : "--", color.new(#ffffff, 70), #ffffff)
+    f_cell(2, 1,  in_ny ? "Active" : "Off (outside NY)", color.new(#ffffff, 70), in_ny ? #00E676 : #FF5252)
+
+    f_cell(0, 2,  "SQ9 +1/4",      color.new(#00E5FF, 75), #00E5FF)
+    f_cell(1, 2,  str.tostring(math.round(sq9_u1, 2)), color.new(#00E5FF, 75), #00E5FF)
+    f_cell(2, 2,  "Resist",        color.new(#00E5FF, 75), #00E5FF)
+
+    f_cell(0, 3,  "SQ9 +1/2",      color.new(#00E5FF, 65), #00E5FF)
+    f_cell(1, 3,  str.tostring(math.round(sq9_u2, 2)), color.new(#00E5FF, 65), #00E5FF)
+    f_cell(2, 3,  "Resist",        color.new(#00E5FF, 65), #00E5FF)
+
+    f_cell(0, 4,  "SQ9 +3/4",      color.new(#00E5FF, 55), #00E5FF)
+    f_cell(1, 4,  str.tostring(math.round(sq9_u3, 2)), color.new(#00E5FF, 55), #00E5FF)
+    f_cell(2, 4,  "Strong",        color.new(#00E5FF, 55), #00E5FF)
+
+    f_cell(0, 5,  "SQ9 +360",      color.new(#00BCD4, 40), #00BCD4)
+    f_cell(1, 5,  str.tostring(math.round(sq9_u4, 2)), color.new(#00BCD4, 40), #00BCD4)
+    f_cell(2, 5,  "Big Target",    color.new(#00BCD4, 40), #00BCD4)
+
+    f_cell(0, 6,  "SQ9 -1/4",      color.new(#FF4081, 75), #FF4081)
+    f_cell(1, 6,  str.tostring(math.round(sq9_d1, 2)), color.new(#FF4081, 75), #FF4081)
+    f_cell(2, 6,  "Support",       color.new(#FF4081, 75), #FF4081)
+
+    f_cell(0, 7,  "SQ9 -1/2",      color.new(#FF4081, 65), #FF4081)
+    f_cell(1, 7,  str.tostring(math.round(sq9_d2, 2)), color.new(#FF4081, 65), #FF4081)
+    f_cell(2, 7,  "Support",       color.new(#FF4081, 65), #FF4081)
+
+    f_cell(0, 8,  "SQ9 -3/4",      color.new(#FF4081, 55), #FF4081)
+    f_cell(1, 8,  str.tostring(math.round(sq9_d3, 2)), color.new(#FF4081, 55), #FF4081)
+    f_cell(2, 8,  "Strong",        color.new(#FF4081, 55), #FF4081)
+
+    f_cell(0, 9,  "SQ9 -360",      color.new(#E91E63, 40), #E91E63)
+    f_cell(1, 9,  str.tostring(math.round(sq9_d4, 2)), color.new(#E91E63, 40), #E91E63)
+    f_cell(2, 9,  "Big Target",    color.new(#E91E63, 40), #E91E63)
+
+    f_cell(0, 10, "-- Eighths --", color.new(#FFD700, 50), #FFD700)
+    f_cell(1, 10, "Range " + str.tostring(e_rng, "#") + "$", color.new(#FFD700, 50), #FFD700)
+    f_cell(2, 10, "Eighths",       color.new(#FFD700, 50), #FFD700)
+
+    f_cell(0, 11, "1/8 up",        color.new(#FFD700, 75), #FFD700)
+    f_cell(1, 11, str.tostring(math.round(eighth_u1, 2)), color.new(#FFD700, 75), #FFD700)
+    f_cell(2, 11, "1/8",           color.new(#FFD700, 75), #FFD700)
+
+    f_cell(0, 12, "2/8 up",        color.new(#FFD700, 65), #FFD700)
+    f_cell(1, 12, str.tostring(math.round(eighth_u2, 2)), color.new(#FFD700, 65), #FFD700)
+    f_cell(2, 12, "2/8",           color.new(#FFD700, 65), #FFD700)
+
+    f_cell(0, 13, "4/8 mid",       color.new(#FF9800, 50), #FF9800)
+    f_cell(1, 13, str.tostring(math.round(eighth_u4, 2)), color.new(#FF9800, 50), #FF9800)
+    f_cell(2, 13, "4/8",           color.new(#FF9800, 50), #FF9800)
+
+    f_cell(0, 14, "1/8 dn",        color.new(#FFD700, 75), #FFD700)
+    f_cell(1, 14, str.tostring(math.round(eighth_d1, 2)), color.new(#FFD700, 75), #FFD700)
+    f_cell(2, 14, "1/8",           color.new(#FFD700, 75), #FFD700)
+
+    f_cell(0, 15, "2/8 dn",        color.new(#FFD700, 65), #FFD700)
+    f_cell(1, 15, str.tostring(math.round(eighth_d2, 2)), color.new(#FFD700, 65), #FFD700)
+    f_cell(2, 15, "2/8",           color.new(#FFD700, 65), #FFD700)
+
+    f_cell(0, 16, "4/8 mid dn",    color.new(#FF9800, 50), #FF9800)
+    f_cell(1, 16, str.tostring(math.round(eighth_d4, 2)), color.new(#FF9800, 50), #FF9800)
+    f_cell(2, 16, "4/8",           color.new(#FF9800, 50), #FF9800)
+
+    f_cell(0, 17, "Updated",       color.new(#37474f, 20), #78909C)
+    f_cell(1, 17, "NY " + str.tostring(ny_hour, "00") + ":" + str.tostring(ny_minute, "00"), color.new(#37474f, 20), #78909C)
+    f_cell(2, 17, "Gann Method",   color.new(#37474f, 20), #78909C)
+
+// ─────────────────────────────────────────────
+// تنبيه عند الاقتراب من مستوى
+// ─────────────────────────────────────────────
+tolerance = syminfo.mintick * 50
+
+near_sq9 = (math.abs(close - sq9_u1) <= tolerance or math.abs(close - sq9_u2) <= tolerance or math.abs(close - sq9_u3) <= tolerance or math.abs(close - sq9_u4) <= tolerance or math.abs(close - sq9_d1) <= tolerance or math.abs(close - sq9_d2) <= tolerance or math.abs(close - sq9_d3) <= tolerance or math.abs(close - sq9_d4) <= tolerance)
+
+near_8th = (math.abs(close - eighth_u1) <= tolerance or math.abs(close - eighth_u2) <= tolerance or math.abs(close - eighth_u3) <= tolerance or math.abs(close - eighth_u4) <= tolerance or math.abs(close - eighth_d1) <= tolerance or math.abs(close - eighth_d2) <= tolerance or math.abs(close - eighth_d3) <= tolerance or math.abs(close - eighth_d4) <= tolerance)
+
+plotshape(near_sq9,
+          title="Near SQ9 Level",
+          style=shape.diamond,
+          location=location.abovebar,
+          color=color.new(#FFD700, 0),
+          size=size.small)
+
+plotshape(near_8th,
+          title="Near Eighth Level",
+          style=shape.circle,
+          location=location.belowbar,
+          color=color.new(#FF9800, 0),
+          size=size.tiny)
+
+// ─────────────────────────────────────────────
+// تنبيهات
+// ─────────────────────────────────────────────
+alertcondition(near_sq9, title="Near Gann SQ9 Level", message="Gold approaching Gann SQ9 level!")
+alertcondition(near_8th, title="Near Eighth Level",   message="Gold approaching Gann Eighth level!")
