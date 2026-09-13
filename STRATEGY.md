@@ -102,7 +102,9 @@
 
 אחרי כל סבב מוצלח (`run_cycle`) הבוט כותב `heartbeat.txt` בתיקיית הפרויקט (חותמת UTC).  
 `watchdog.ps1` בודק כל ~30 שניות: אם אין תהליך / הדופק ישן מ־90 שניות — מפעיל MT5 (אם צריך) ו־`python bot.py` מחדש.  
-על VPS: תיקייה `C:\bots\xauusd`, משימת Scheduler אחת ב־**AtLogOn** בלבד.
+`$BotDir` = תיקיית הסקריפט (`$PSScriptRoot`). Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.  
+תיקונים קבועים ל־VPS בלי להידרס ב־pull: `watchdog.local.ps1` (ב־`.gitignore`).  
+על VPS: משימת Scheduler אחת ב־**AtLogOn** בלבד.
 
 
 ## רמות Gann אוטומטיות
@@ -149,6 +151,7 @@ python bot.py
 
 ## היסטוריית שינויים
 
+- **2026-09-13** — Watchdog: `$PSScriptRoot`, `WATCHDOG_PYTHON` / `watchdog.local.ps1`; `.gitignore` ל־`heartbeat.txt` / `*.bak` / `*.log`.
 - **2026-09-13** — Heartbeat: אחרי כל `run_cycle` נכתב `heartbeat.txt`; `watchdog.ps1` ל־VPS (`C:\bots\xauusd`).
 - **2026-09-13** — פחות כתיבות לסופבייס: PATCH לפתוחות רק אם profit/SL/TP השתנו; cache ל־Gann/statics אחרי שמירה.
 - **2026-09-13** — סטטיסטיקה יומית ל־`gold_statics` (`statics.py`): tp/sl/lock + רווח בסוף היום.

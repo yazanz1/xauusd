@@ -21,6 +21,7 @@
 - בסוף כל יום (אחרי 00:05 ישראל) סיכום ל־`gold_statics`: tp/sl/lock + רווח + פיפס
 - Gann נשמר ב-`gann_levels` בלי לפתוח ממנו
 - Heartbeat: אחרי כל סבב מוצלח נכתב `heartbeat.txt` ליד `bot.py`; `watchdog.ps1` מפעיל מחדש אם הדופק ישן
+- Watchdog: python מ־`.venv` או `WATCHDOG_PYTHON` / `watchdog.local.ps1` (לא נדרס ב־pull); ignore ל־`*.bak` / לוגים / heartbeat
 
 ## החלטות שחייבות להישאר
 

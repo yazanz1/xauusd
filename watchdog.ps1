@@ -1,28 +1,49 @@
 # Watchdog for xaubot — restart bot (and MT5 if needed) when heartbeat is stale.
-# VPS defaults; edit $BotDir if the folder differs.
-# Run: powershell -ExecutionPolicy Bypass -File C:\bots\xauusd\watchdog.ps1
+# Run: powershell -ExecutionPolicy Bypass -File .\watchdog.ps1
 # Schedule: Task Scheduler AtLogOn only (MT5 needs an interactive session).
+#
+# Optional permanent overrides (not in git): create watchdog.local.ps1 next to this file, e.g.
+#   $Python = "C:\bots\xauusd\.venv\Scripts\python.exe"
+# Or set WATCHDOG_PYTHON=... in .env
 
-$BotDir = "C:\bots\xauusd"
+$BotDir = if ($PSScriptRoot) { $PSScriptRoot } else { "C:\bots\xauusd" }
 $EntryScript = "bot.py"
 $HeartbeatFile = Join-Path $BotDir "heartbeat.txt"
 $StaleSec = 90
 $CheckEverySec = 30
 $LogFile = Join-Path $BotDir "watchdog.log"
 
-$VenvPython = Join-Path $BotDir ".venv\Scripts\python.exe"
-$Python = if (Test-Path $VenvPython) { $VenvPython } else { "python" }
-
-$Mt5Path = $null
 $EnvFile = Join-Path $BotDir ".env"
+$Mt5Path = $null
+$PythonFromEnv = $null
 if (Test-Path $EnvFile) {
-    $line = Get-Content $EnvFile | Where-Object { $_ -match '^\s*MT5_PATH\s*=' } | Select-Object -First 1
-    if ($line) {
-        $Mt5Path = ($line -split '=', 2)[1].Trim().Trim('"').Trim("'")
+    Get-Content $EnvFile | ForEach-Object {
+        if ($_ -match '^\s*MT5_PATH\s*=\s*(.+)\s*$') {
+            $Mt5Path = $Matches[1].Trim().Trim('"').Trim("'")
+        }
+        if ($_ -match '^\s*WATCHDOG_PYTHON\s*=\s*(.+)\s*$') {
+            $PythonFromEnv = $Matches[1].Trim().Trim('"').Trim("'")
+        }
     }
 }
 if (-not $Mt5Path) {
     $Mt5Path = "C:\Program Files\MetaTrader 5\terminal64.exe"
+}
+
+$VenvPython = Join-Path $BotDir ".venv\Scripts\python.exe"
+$Python = $null
+if ($PythonFromEnv -and (Test-Path $PythonFromEnv)) {
+    $Python = $PythonFromEnv
+} elseif (Test-Path $VenvPython) {
+    $Python = $VenvPython
+} else {
+    $Python = "python"
+}
+
+# Local overrides survive git pull (file is gitignored).
+$LocalOverride = Join-Path $BotDir "watchdog.local.ps1"
+if (Test-Path $LocalOverride) {
+    . $LocalOverride
 }
 
 function Write-Log([string]$msg) {
@@ -32,11 +53,18 @@ function Write-Log([string]$msg) {
 }
 
 function Get-BotProcesses {
+    # Match bot.py for this folder. Do not require ExecutablePath under $BotDir:
+    # Windows venv redirector often runs base Python311\python.exe as the child.
+    $scriptNeedle = Join-Path $BotDir $EntryScript
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -and
-            ($_.CommandLine -like "*$EntryScript*") -and
-            ($_.CommandLine -like "*$BotDir*" -or $_.ExecutablePath -like "*$BotDir*")
+            if (-not $_.CommandLine) { return $false }
+            $cl = $_.CommandLine
+            ($cl -like "*$EntryScript*") -and (
+                ($cl -like "*$BotDir*") -or
+                ($cl -like "*$scriptNeedle*") -or
+                ($cl -match [regex]::Escape($EntryScript) + '\s*$')
+            )
         }
 }
 
@@ -67,7 +95,7 @@ function Start-Bot {
     }
     Write-Log "Starting bot: $Python $EntryScript"
     Start-Process -FilePath $Python `
-        -ArgumentList $EntryScript `
+        -ArgumentList "`"$EntryScript`"" `
         -WorkingDirectory $BotDir `
         -WindowStyle Minimized
 }

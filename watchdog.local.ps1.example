@@ -1,0 +1,4 @@
+# Optional watchdog overrides — copy to watchdog.local.ps1 on the VPS (gitignored).
+# Example:
+# $Python = "C:\bots\xauusd\.venv\Scripts\python.exe"
+# $StaleSec = 120

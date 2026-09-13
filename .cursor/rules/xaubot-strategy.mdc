@@ -28,7 +28,7 @@ Current rules (2026-09-12):
 - Trade timestamps stay UTC; Israel TZ only for hour filters + Gann `date_idt`.
 - After Israel 00:05, once per day write yesterday's aggregates to `gold_statics` (tp/sl/lock counts + profit/pips). Module `statics.py`.
 - Each trading day write Gann grids to `gann_levels`. Do not open trades from those rows.
-- After each successful `run_cycle`, write `heartbeat.txt` next to `bot.py` (UTC). `watchdog.ps1` restarts the bot if heartbeat is stale (~90s).
+- After each successful `run_cycle`, write `heartbeat.txt` next to `bot.py` (UTC). `watchdog.ps1` restarts the bot if heartbeat is stale (~90s). Python from `.venv`, `WATCHDOG_PYTHON`, or gitignored `watchdog.local.ps1`.
 
 ## When the strategy changes
 
