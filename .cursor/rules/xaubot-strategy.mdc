@@ -21,7 +21,8 @@ Current rules (2026-09-12):
 - SL/TP from the row. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
 - After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price` (do not overwrite journal `entry`). On failure write `mt5_error` and clear claim.
 - Lock 40/35 locally: `none → pend → locked`. Formula from webhook `entry`+`tp`. On closed M5 40% hit → pend; at start of next M5 → `set_sl` at 35%. `LOCK_ENABLE` default on.
-- Each poll sync open tickets: floating in `mt5_profit`; if closed in MT5 set `closed` + `mt5_close_*` / `mt5_profit` and classic exit/pips/usd_0_3 with `exit_reason` tp/sl/lock.
+- Each poll sync open tickets: write floating/`stop`/`tp` only when values changed; if closed in MT5 set `closed` + `mt5_close_*` / `mt5_profit` and classic exit/pips/usd_0_3 with `exit_reason` tp/sl/lock.
+- Gann/statics existence checks are cached in-process after a successful save (no repeat SELECT every poll).
 - After connect/ensure: auto-enable MT5 Algo Trading toolbar if it is off.
 - Do not generate signals. Do not size lots by risk. Do not trail/partial-close yet.
 - Trade timestamps stay UTC; Israel TZ only for hour filters + Gann `date_idt`.

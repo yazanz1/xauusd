@@ -21,6 +21,9 @@ FINALIZE_AFTER = (0, 5)
 
 log = logging.getLogger("xaubot.statics")
 
+# Skip repeat SELECT/upsert once yesterday is finalized this process.
+_saved_days: set[str] = set()
+
 
 def _israel_now(now: datetime | None = None) -> datetime:
     if now is None:
@@ -97,6 +100,8 @@ def compute_day_stats(db: Client, date_idt: str | date) -> dict[str, Any]:
 
 
 def _already_saved(db: Client, date_idt: str) -> bool:
+    if date_idt in _saved_days:
+        return True
     result = (
         db.table(STATICS_TABLE)
         .select("id")
@@ -104,7 +109,10 @@ def _already_saved(db: Client, date_idt: str) -> bool:
         .limit(1)
         .execute()
     )
-    return bool(result.data)
+    if result.data:
+        _saved_days.add(date_idt)
+        return True
+    return False
 
 
 def upsert_day_stats(db: Client, date_idt: str | date, *, force: bool = False) -> dict[str, Any] | None:
@@ -116,6 +124,7 @@ def upsert_day_stats(db: Client, date_idt: str | date, *, force: bool = False) -
 
     stats = compute_day_stats(db, day)
     db.table(STATICS_TABLE).upsert(stats, on_conflict="date_idt").execute()
+    _saved_days.add(day)
     log.info(
         "Statics %s: total=%s closed=%s tp=%s sl=%s lock=%s other=%s profit=%s pips=%s",
         day,

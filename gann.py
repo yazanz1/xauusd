@@ -24,6 +24,41 @@ NY_TZ = ZoneInfo("America/New_York")
 
 log = logging.getLogger("xaubot.gann")
 
+# Avoid repeat SELECT id once a session grid is known saved for the day.
+_saved_cache: set[tuple[str, str]] = set()
+_saved_cache_day: str | None = None
+
+
+def _cache_reset_if_new_day(date_idt: str) -> None:
+    global _saved_cache_day, _saved_cache
+    if _saved_cache_day != date_idt:
+        _saved_cache = set()
+        _saved_cache_day = date_idt
+
+
+def _already_saved(db: Client, date_idt: str, session: str) -> bool:
+    _cache_reset_if_new_day(date_idt)
+    key = (date_idt, session)
+    if key in _saved_cache:
+        return True
+    result = (
+        db.table(TABLE)
+        .select("id")
+        .eq("date_idt", date_idt)
+        .eq("session", session)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        _saved_cache.add(key)
+        return True
+    return False
+
+
+def _mark_saved(date_idt: str, session: str) -> None:
+    _cache_reset_if_new_day(date_idt)
+    _saved_cache.add((date_idt, session))
+
 
 def compute_levels(base: float, eighth_range: float, *, step: float = SQ9_STEP, count: int = SQ9_COUNT) -> dict[str, float]:
     root = math.sqrt(base)
@@ -50,18 +85,6 @@ def _session_open(tz: ZoneInfo, hour: int, minute: int, on_date) -> datetime:
     return datetime.combine(on_date, time(hour, minute), tzinfo=tz)
 
 
-def _already_saved(db: Client, date_idt: str, session: str) -> bool:
-    result = (
-        db.table(TABLE)
-        .select("id")
-        .eq("date_idt", date_idt)
-        .eq("session", session)
-        .limit(1)
-        .execute()
-    )
-    return bool(result.data)
-
-
 def _save(
     db: Client,
     *,
@@ -85,6 +108,7 @@ def _save(
         **levels,
     }
     db.table(TABLE).upsert(payload, on_conflict="date_idt,session").execute()
+    _mark_saved(date_idt, session)
     log.info(
         "Saved %s %s base=%s eighth_range=%s u1=%s d1=%s",
         date_idt,

@@ -341,6 +341,27 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
 
     if pos is not None:
         floating = round(float(pos.profit + pos.swap), 2)
+        new_sl = float(pos.sl) if pos.sl else 0.0
+        new_tp = float(pos.tp) if pos.tp else 0.0
+        prev_profit = to_float(trade.get("mt5_profit"))
+        if prev_profit is None:
+            prev_profit = to_float(trade.get("usd_0_3"))
+        prev_sl = to_float(trade.get("stop"))
+        prev_tp = to_float(trade.get("tp"))
+
+        profit_changed = prev_profit is None or abs(prev_profit - floating) >= 0.01
+        sl_changed = prev_sl is None or abs(prev_sl - new_sl) >= 1e-6
+        tp_changed = prev_tp is None or abs(prev_tp - new_tp) >= 1e-6
+
+        if not (profit_changed or sl_changed or tp_changed):
+            log.debug(
+                "Open ticket=%s unchanged floating=%s lock=%s",
+                ticket,
+                floating,
+                trade.get("lock_state") or "none",
+            )
+            return
+
         payload = {
             "stop": pos.sl,
             "tp": pos.tp,

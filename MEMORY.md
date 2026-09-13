@@ -16,6 +16,8 @@
 - אחרי מילוי: `mt5_ticket` + `mt5_fill_price` (לא דורסים `entry` של היומן)
 - נעילה 40/35 מקומית: `none→pend→locked` על נרות M5; נוסחה מ־`entry`+`tp` של הוובהוק; נגיעה ב־40% → בנר הבא SL ל־35%
 - סגירה מ-MT5 → Supabase: `exit_reason` = `tp`/`sl`/`lock` + `pips` + `usd_0_3` / `mt5_*`
+- סנכרון פתוחות: PATCH לסופבייס רק אם profit/SL/TP השתנו (לא כל 5 שניות סתם)
+- Gann/statics: cache מקומי אחרי שמירה — בלי SELECT חוזר בכל poll
 - בסוף כל יום (אחרי 00:05 ישראל) סיכום ל־`gold_statics`: tp/sl/lock + רווח + פיפס
 - Gann נשמר ב-`gann_levels` בלי לפתוח ממנו
 
