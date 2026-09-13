@@ -11,3 +11,4 @@ sessions/**/*.json
 !sessions/.gitkeep
 bot.log
 *.log
+heartbeat.txt

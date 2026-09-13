@@ -1,6 +1,6 @@
 # Memory — xaubot
 
-עודכן לאחרונה: 2026-09-13 (statics + DRY_RUN=0)
+עודכן לאחרונה: 2026-09-13 (heartbeat + watchdog)
 
 זה קובץ הזיכרון החי של האסטרטגיה. בכל שיפור — לעדכן כאן **ואת** `STRATEGY.md`.
 
@@ -20,6 +20,7 @@
 - Gann/statics: cache מקומי אחרי שמירה — בלי SELECT חוזר בכל poll
 - בסוף כל יום (אחרי 00:05 ישראל) סיכום ל־`gold_statics`: tp/sl/lock + רווח + פיפס
 - Gann נשמר ב-`gann_levels` בלי לפתוח ממנו
+- Heartbeat: אחרי כל סבב מוצלח נכתב `heartbeat.txt` ליד `bot.py`; `watchdog.ps1` מפעיל מחדש אם הדופק ישן
 
 ## החלטות שחייבות להישאר
 

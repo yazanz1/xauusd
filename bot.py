@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -502,6 +503,10 @@ def main() -> None:
                 time.sleep(poll_sec)
                 continue
             run_cycle(db, mt5)
+            # Local heartbeat for watchdog: fresh only after a completed cycle.
+            (Path(__file__).resolve().parent / "heartbeat.txt").write_text(
+                iso(utcnow()), encoding="utf-8"
+            )
             time.sleep(poll_sec)
     except KeyboardInterrupt:
         log.info("Stopped by user")
