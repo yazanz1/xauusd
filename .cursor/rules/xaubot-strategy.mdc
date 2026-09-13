@@ -7,17 +7,25 @@ alwaysApply: true
 
 This project copies `gold_trades` signals from Supabase (`pcieshmxxwplaodkrqet`) into MT5 (local or Windows VPS).
 
-Current rules (2026-09-08):
+Current rules (2026-09-12):
 
 - Poll every `POLL_SEC` seconds (default 5). Immediate scan on startup.
 - New signal = `status=open` and `mt5_ticket` is null. Market order only: long=BUY, short=SELL.
-- Guards before open: `MAX_AGE_SEC`, `MAX_SLIP_USD`, `MAX_OPEN`, broker stops distance, optional `DRY_RUN`.
+- Filters live under `filters/` (one file each); `active_filters()` runs before open.
+- First filter `israel_hours`: no new entries during Israel `[12:00,14:30)` and `[22:00,24:00)`.
+- Second filter `london_after_ny`: from Israel `15:30` block `color=london`; allow `yellow` and `ny`.
+- Third filter `us_holiday_next_day`: on next weekday after observed US holiday, new entries only until `10:00` IDT; open trades continue.
+- Fourth filter `ny_open`: every day no new entries Israel `[15:20,15:30)` (NY cash open / fake liquidity).
+- Guards before open: filters, `MAX_AGE_SEC`, `MAX_SLIP_USD`, `MAX_OPEN`, broker stops distance. Default `DRY_RUN=0` (live opens); set `1` only to simulate.
 - Claim `copied_at` (null-only) before send to avoid double-open.
 - SL/TP from the row. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
 - After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price` (do not overwrite journal `entry`). On failure write `mt5_error` and clear claim.
-- Each poll sync open tickets: floating in `mt5_profit`; if closed in MT5 set `closed` + `mt5_close_*` / `mt5_profit` and classic exit/pips/usd_0_3.
+- Lock 40/35 locally: `none → pend → locked`. Formula from webhook `entry`+`tp`. On closed M5 40% hit → pend; at start of next M5 → `set_sl` at 35%. `LOCK_ENABLE` default on.
+- Each poll sync open tickets: floating in `mt5_profit`; if closed in MT5 set `closed` + `mt5_close_*` / `mt5_profit` and classic exit/pips/usd_0_3 with `exit_reason` tp/sl/lock.
 - After connect/ensure: auto-enable MT5 Algo Trading toolbar if it is off.
-- Do not generate signals. Do not filter by `color`. Do not size lots by risk. Do not trail/lock/partial-close yet.
+- Do not generate signals. Do not size lots by risk. Do not trail/partial-close yet.
+- Trade timestamps stay UTC; Israel TZ only for hour filters + Gann `date_idt`.
+- After Israel 00:05, once per day write yesterday's aggregates to `gold_statics` (tp/sl/lock counts + profit/pips). Module `statics.py`.
 - Each trading day write Gann grids to `gann_levels`. Do not open trades from those rows.
 
 ## When the strategy changes

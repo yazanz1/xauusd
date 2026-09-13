@@ -2,7 +2,8 @@
 
 Flow each poll:
 1) open new signals (market + SL/TP)
-2) sync open tickets (floating / close → Supabase)
+2) manage 40/35 lock on open tickets (none → pend → locked)
+3) sync open tickets (floating / close → Supabase)
 """
 
 from __future__ import annotations
@@ -16,9 +17,12 @@ from typing import Any
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
+from filters import active_filters, run_filters
 from gann import sync_gann_levels
+from lock import manage_lock, resolve_exit_reason
 from mt5_client import MT5Client, MT5Error
 from sessions import SessionManager
+from statics import sync_daily_statics
 
 TABLE = "gold_trades"
 MAGIC = 260831
@@ -183,7 +187,7 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     max_age = env_float("MAX_AGE_SEC", 180)
     max_slip = env_float("MAX_SLIP_USD", 1.5)
     max_open = env_int("MAX_OPEN", 2)
-    dry_run = env_bool("DRY_RUN", True)
+    dry_run = env_bool("DRY_RUN", False)
 
     direction = (trade.get("direction") or "").lower()
     stop = to_float(trade.get("stop"))
@@ -199,6 +203,13 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         update_trade(db, trade_id, {"mt5_error": "missing stop or tp"})
         log.error("Skip %s: missing stop/tp", trade_id)
         return
+
+    filt = run_filters(trade, active_filters())
+    if not filt.allowed:
+        update_trade(db, trade_id, {"mt5_error": filt.reason})
+        log.warning("Skip %s: %s", trade_id, filt.reason)
+        return
+
     if not signal_age_ok(trade, max_age):
         update_trade(db, trade_id, {"mt5_error": f"signal too old (> {max_age}s)"})
         log.warning("Skip %s: signal too old", trade_id)
@@ -281,14 +292,19 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         "mt5_fill_price": fill_price,
         "stop": result.sl if result.sl is not None else stop,
         "tp": result.tp if result.tp is not None else tp,
+        "lock_state": "none",
+        "lock_sl": None,
+        "lock_pend_bar_time": None,
+        "orig_stop": stop,
     }
     try:
         update_trade(db, trade_id, payload)
     except Exception:
-        # Columns mt5_fill_price may be missing until SQL migration runs.
-        payload.pop("mt5_fill_price", None)
+        # Columns may be missing until SQL migrations run.
+        for key in ("mt5_fill_price", "lock_state", "lock_sl", "lock_pend_bar_time", "orig_stop"):
+            payload.pop(key, None)
         update_trade(db, trade_id, payload)
-        log.warning("mt5_fill_price column missing — ran without it. Apply sql/mt5_bridge_columns.sql")
+        log.warning("optional columns missing — apply sql/mt5_bridge_columns.sql and sql/lock_columns.sql")
 
     log.info(
         "Opened %s %s ticket=%s volume=%s fill=%s sl=%s tp=%s",
@@ -318,7 +334,9 @@ def history_deals_for(mt5: MT5Client, ticket: int, copied_at: Any):
 def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     ticket = int(trade["mt5_ticket"])
     direction = (trade.get("direction") or "").lower()
-    entry = to_float(trade.get("mt5_fill_price")) or to_float(trade.get("entry"))
+    # Journal pips use webhook entry (1:1 with Pine); fill is kept in mt5_fill_price.
+    journal_entry = to_float(trade.get("entry"))
+    fill_entry = to_float(trade.get("mt5_fill_price")) or journal_entry
     pos = mt5.get_position(ticket)
 
     if pos is not None:
@@ -334,7 +352,7 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
             payload.pop("mt5_profit", None)
             payload["usd_0_3"] = floating
             update_trade(db, trade["id"], payload)
-        log.info("Open ticket=%s floating=%s", ticket, floating)
+        log.info("Open ticket=%s floating=%s lock=%s", ticket, floating, trade.get("lock_state") or "none")
         return
 
     deals = history_deals_for(mt5, ticket, trade.get("copied_at"))
@@ -350,12 +368,14 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     )
     exit_price = float(last.price)
     exit_dt = datetime.fromtimestamp(last.time, tz=timezone.utc)
-    pips = calc_pips(direction, entry, exit_price)
+    mt5_reason = deal_exit_reason(int(last.reason))
+    exit_reason = resolve_exit_reason(trade, exit_price=exit_price, mt5_reason=mt5_reason)
+    pips = calc_pips(direction, journal_entry or fill_entry, exit_price)
     payload = {
         "status": "closed",
         "exit": exit_price,
         "exit_time": iso(exit_dt),
-        "exit_reason": deal_exit_reason(int(last.reason)),
+        "exit_reason": exit_reason,
         "pips": pips,
         "usd_0_3": profit,
         "mt5_close_price": exit_price,
@@ -370,7 +390,14 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         update_trade(db, trade["id"], payload)
         log.warning("mt5 close columns missing — wrote classic close fields only")
 
-    log.info("Closed ticket=%s exit=%s profit=%s pips=%s", ticket, exit_price, profit, pips)
+    log.info(
+        "Closed ticket=%s reason=%s exit=%s profit=%s pips=%s",
+        ticket,
+        exit_reason,
+        exit_price,
+        profit,
+        pips,
+    )
 
 
 def run_cycle(db: Client, mt5: MT5Client) -> None:
@@ -382,6 +409,11 @@ def run_cycle(db: Client, mt5: MT5Client) -> None:
         sync_gann_levels(db, mt5)
     except Exception:
         log.exception("Gann level sync failed")
+
+    try:
+        sync_daily_statics(db)
+    except Exception:
+        log.exception("Daily statics sync failed")
 
     new_signals = fetch_new_signals(db)
     log.info("New signals: %s", len(new_signals))
@@ -397,11 +429,18 @@ def run_cycle(db: Client, mt5: MT5Client) -> None:
 
     open_copied = fetch_open_copied(db)
     log.info("Open copied trades: %s", len(open_copied))
+    dry_run = env_bool("DRY_RUN", False)
     for trade in open_copied:
         try:
+            trade = manage_lock(
+                trade,
+                mt5,
+                update_trade=lambda tid, payload, _db=db: update_trade(_db, tid, payload),
+                dry_run=dry_run,
+            )
             sync_trade(db, mt5, trade)
         except Exception:
-            log.exception("Failed to sync trade %s", trade.get("id"))
+            log.exception("Failed to sync/lock trade %s", trade.get("id"))
 
 
 def main() -> None:
@@ -413,7 +452,7 @@ def main() -> None:
     )
 
     poll_sec = env_float("POLL_SEC", 5)
-    dry_run = env_bool("DRY_RUN", True)
+    dry_run = env_bool("DRY_RUN", False)
 
     db = connect_supabase()
     session = SessionManager(magic=MAGIC)

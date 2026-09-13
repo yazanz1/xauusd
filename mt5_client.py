@@ -557,6 +557,13 @@ class MT5Client:
         prev = bars[0]
         return float(prev["close"]), datetime.fromtimestamp(int(prev["time"]), tz=timezone.utc)
 
+    def m5_bars(self, symbol: str, count: int = 5) -> list:
+        """Latest M5 bars; index 0 is oldest among the returned set, -1 is current forming."""
+        api = _require_mt5()
+        self.symbol_info(symbol)
+        bars = api.copy_rates_from_pos(symbol, api.TIMEFRAME_M5, 0, count)
+        return list(bars) if bars is not None else []
+
     def history_deals(
         self,
         date_from: datetime,
