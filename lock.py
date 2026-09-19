@@ -192,19 +192,37 @@ def resolve_exit_reason(
     exit_price: float,
     mt5_reason: str,
 ) -> str:
-    """Map MT5 close to journal exit_reason; prefer lock when SL hit after lock."""
-    if mt5_reason == "tp":
-        return "tp"
+    """Map MT5 close to journal exit_reason.
 
+    Prefer price vs levels over broker reason codes (codes were historically
+    mis-mapped; geometry is the source of truth for tp/sl/lock).
+    """
     lock_state = (trade.get("lock_state") or "none").lower()
     lock_sl = _to_float(trade.get("lock_sl"))
     orig = _to_float(trade.get("orig_stop"))
+    if orig is None:
+        orig = _to_float(trade.get("stop"))
+    tp = _to_float(trade.get("tp"))
+    tol = 0.05
 
-    if lock_state == "locked" and lock_sl is not None:
-        if abs(exit_price - lock_sl) <= abs(exit_price - (orig or lock_sl)) + 0.05:
-            return "lock"
+    if lock_state == "locked" and lock_sl is not None and abs(exit_price - lock_sl) <= tol:
         return "lock"
 
-    if mt5_reason == "sl":
+    if orig is not None and abs(exit_price - orig) <= tol:
+        return "sl"
+
+    if tp is not None and abs(exit_price - tp) <= tol:
+        return "tp"
+
+    if lock_state == "locked" and lock_sl is not None:
+        # Locked but exit not exactly on lock_sl — still treat SL-side as lock.
+        if mt5_reason in ("sl", "so") or (
+            orig is not None and abs(exit_price - lock_sl) <= abs(exit_price - orig) + tol
+        ):
+            return "lock"
+
+    if mt5_reason in ("tp", "sl", "lock"):
+        return mt5_reason
+    if mt5_reason == "so":
         return "sl"
     return mt5_reason

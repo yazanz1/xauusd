@@ -1,6 +1,6 @@
 # אסטרטגיית xaubot
 
-עודכן לאחרונה: 2026-09-13
+עודכן לאחרונה: 2026-09-19
 
 בוט העתקה: קורא איתותים מ-Supabase ופותח אותם בחשבון MT5 (מקומי או VPS).  
 הבוט **לא** מייצר איתותים. האיתות נוצר במקור חיצוני (טבלת `gold_trades`).  
@@ -93,7 +93,9 @@
 
 כל סריקה, לכל שורה `open` עם ticket:
 - פתוחה ב-MT5 → עדכון `mt5_profit` / SL/TP **רק אם השתנו** (סף רווח $0.01)
-- נסגרה ב-MT5 (SL/TP/ידני) → `status=closed`, `mt5_close_price`, `mt5_closed_at`, `mt5_profit`, וגם `exit` / `exit_time` / `exit_reason` / `pips` / `usd_0_3`
+- נסגרה ב-MT5 → רק אם יש deal יציאה עם `position_id` = הטיקט (`history_deals_get(position=...)`). **לא** לפי `order` ו**לא** לפי חלון זמן בלבד
+- בלי פוזיציה ובלי OUT deal של אותה פוזיציה → **לא** מסמנים `closed`
+- אחרי הסנכרון: בדיקת יתומים — פוזיציית MAGIC ב־MT5 בלי שורת `status=open` → לוג `ORPHAN` בלבד (לא סוגר אוטומטית)
 
 הבוט **לא** סוגר יזום — הסגירה מגיעה מ-SL/TP ב-MT5 (או ידני בטרמינל).  
 בהתחברות/סריקה: אם Algo Trading כבוי — הבוט מדליק אותו אוטומטית.
@@ -151,6 +153,7 @@ python bot.py
 
 ## היסטוריית שינויים
 
+- **2026-09-19** — סנכרון סגירות: `history_deals_get(position=ticket)` אחרי טעינת טווח היסטוריה; בלי `order==ticket`; לא לסמן closed בלי OUT; ORPHAN בלוג; מיפוי DEAL_REASON תוקן (4=sl,5=tp); `resolve_exit_reason` לפי מחיר מול stop/tp/lock.
 - **2026-09-13** — Watchdog: `$PSScriptRoot`, `WATCHDOG_PYTHON` / `watchdog.local.ps1`; `.gitignore` ל־`heartbeat.txt` / `*.bak` / `*.log`.
 - **2026-09-13** — Heartbeat: אחרי כל `run_cycle` נכתב `heartbeat.txt`; `watchdog.ps1` ל־VPS (`C:\bots\xauusd`).
 - **2026-09-13** — פחות כתיבות לסופבייס: PATCH לפתוחות רק אם profit/SL/TP השתנו; cache ל־Gann/statics אחרי שמירה.

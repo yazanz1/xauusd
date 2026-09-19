@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,12 +30,15 @@ MAGIC = 260831
 DEAL_ENTRY_OUT = 1
 DEAL_ENTRY_INOUT = 2
 
+# Official MetaTrader5 DEAL_REASON_* values (verified against package constants).
 EXIT_REASONS = {
-    3: "sl",
-    4: "tp",
-    5: "so",
-    1: "manual",
-    16: "expert",
+    0: "client",
+    1: "mobile",
+    2: "web",
+    3: "expert",
+    4: "sl",
+    5: "tp",
+    6: "so",
 }
 
 log = logging.getLogger("xaubot")
@@ -319,17 +322,26 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     )
 
 
-def history_deals_for(mt5: MT5Client, ticket: int, copied_at: Any):
-    now = datetime.now()
-    if copied_at:
-        parsed = datetime.fromisoformat(str(copied_at).replace("Z", "+00:00"))
-        if parsed.tzinfo is not None:
-            parsed = parsed.astimezone().replace(tzinfo=None)
-        start = parsed - timedelta(hours=1)
-    else:
-        start = now - timedelta(days=14)
-    end = now + timedelta(days=1)
-    return mt5.history_deals(start, end, ticket=ticket)
+def history_deals_for(mt5: MT5Client, ticket: int, _copied_at: Any = None):
+    """Deals belonging to this position ticket only (no time-window / order-id mixups)."""
+    return mt5.history_deals_by_position(int(ticket))
+
+
+def check_orphans(db: Client, mt5: MT5Client) -> None:
+    """Log MT5 positions (our magic) that have no status=open row — do not auto-close."""
+    symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
+    tracked = {
+        int(r["mt5_ticket"])
+        for r in fetch_open_copied(db)
+        if r.get("mt5_ticket") is not None
+    }
+    for pos in mt5.positions(symbol=symbol, magic=MAGIC):
+        ticket = int(pos.ticket)
+        if ticket not in tracked:
+            log.error(
+                "ORPHAN: position %s open in MT5 but not managed (no status=open row)",
+                ticket,
+            )
 
 
 def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
@@ -377,13 +389,26 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         log.info("Open ticket=%s floating=%s lock=%s", ticket, floating, trade.get("lock_state") or "none")
         return
 
+    # No open position — only mark closed if we have an OUT deal for THIS position.
     deals = history_deals_for(mt5, ticket, trade.get("copied_at"))
+    if any(int(d.position_id) != ticket for d in deals):
+        log.error(
+            "Ticket %s: refusing close — deal position_id mismatch in history",
+            ticket,
+        )
+        return
     out_deals = [d for d in deals if d.entry in (DEAL_ENTRY_OUT, DEAL_ENTRY_INOUT)]
     if not out_deals:
-        log.warning("Ticket %s not in positions and no close deal yet", ticket)
+        log.warning(
+            "Ticket %s: no position and no exit deal for this position_id — not marking closed",
+            ticket,
+        )
         return
 
     last = max(out_deals, key=lambda d: d.time)
+    if int(last.position_id) != ticket:
+        log.error("Ticket %s: exit deal position_id=%s — refusing close", ticket, last.position_id)
+        return
     profit = round(
         sum(d.profit + d.swap + getattr(d, "commission", 0.0) for d in deals),
         2,
@@ -463,6 +488,11 @@ def run_cycle(db: Client, mt5: MT5Client) -> None:
             sync_trade(db, mt5, trade)
         except Exception:
             log.exception("Failed to sync/lock trade %s", trade.get("id"))
+
+    try:
+        check_orphans(db, mt5)
+    except Exception:
+        log.exception("Orphan position check failed")
 
 
 def main() -> None:

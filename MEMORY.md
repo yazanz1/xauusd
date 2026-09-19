@@ -1,6 +1,6 @@
 # Memory — xaubot
 
-עודכן לאחרונה: 2026-09-13 (heartbeat + watchdog)
+עודכן לאחרונה: 2026-09-19 (deal sync fix)
 
 זה קובץ הזיכרון החי של האסטרטגיה. בכל שיפור — לעדכן כאן **ואת** `STRATEGY.md`.
 
@@ -15,7 +15,8 @@
 - פילטרים ב־`filters/`: `israel_hours`, `london_after_ny`, `us_holiday_next_day`, `ny_open` (15:20–15:30 IDT)
 - אחרי מילוי: `mt5_ticket` + `mt5_fill_price` (לא דורסים `entry` של היומן)
 - נעילה 40/35 מקומית: `none→pend→locked` על נרות M5; נוסחה מ־`entry`+`tp` של הוובהוק; נגיעה ב־40% → בנר הבא SL ל־35%
-- סגירה מ-MT5 → Supabase: `exit_reason` = `tp`/`sl`/`lock` + `pips` + `usd_0_3` / `mt5_*`
+- סגירה מ-MT5 → Supabase: deals לפי `position_id` אחרי טעינת היסטוריה; `exit_reason` לפי מחיר מול stop/tp/lock (לא מיפוי reason שבור)
+- יתומים: פוזיציית MAGIC ב־MT5 בלי שורת open → לוג ORPHAN (לא סוגר)
 - סנכרון פתוחות: PATCH לסופבייס רק אם profit/SL/TP השתנו (לא כל 5 שניות סתם)
 - Gann/statics: cache מקומי אחרי שמירה — בלי SELECT חוזר בכל poll
 - בסוף כל יום (אחרי 00:05 ישראל) סיכום ל־`gold_statics`: tp/sl/lock + רווח + פיפס

@@ -564,6 +564,31 @@ class MT5Client:
         bars = api.copy_rates_from_pos(symbol, api.TIMEFRAME_M5, 0, count)
         return list(bars) if bars is not None else []
 
+    def history_deals_by_position(self, position_ticket: int, *, lookback_days: int = 30) -> list:
+        """Deals for one MT5 position only (entry + exit). Never filter by order id.
+
+        Always load a date range into the terminal history first — otherwise
+        `history_deals_get(position=...)` can return empty and the bot would
+        warn forever without marking closed.
+        """
+        api = _require_mt5()
+        pid = int(position_ticket)
+        end = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
+        start = end - timedelta(days=max(1, lookback_days))
+
+        # Prime history window (Python API has no separate history_select).
+        api.history_deals_get(start, end)
+
+        deals = api.history_deals_get(position=pid)
+        if deals:
+            return [d for d in deals if int(d.position_id) == pid]
+
+        # Fallback: range query + strict position_id filter.
+        deals = api.history_deals_get(start, end)
+        if not deals:
+            return []
+        return [d for d in deals if int(d.position_id) == pid]
+
     def history_deals(
         self,
         date_from: datetime,
@@ -578,7 +603,9 @@ class MT5Client:
         rows = list(deals)
         if ticket is None:
             return rows
-        return [d for d in rows if d.position_id == ticket or d.order == ticket]
+        # Position id only — do not match d.order (different id space).
+        pid = int(ticket)
+        return [d for d in rows if int(d.position_id) == pid]
 
     def _send_deal(self, request: dict[str, Any], info, ticket: int | None = None) -> TradeResult:
         api = _require_mt5()
