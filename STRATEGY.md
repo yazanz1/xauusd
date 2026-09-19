@@ -78,8 +78,15 @@
    - לונג: `high >= entry + 0.4*(tp-entry)`  
    - שורט: `low <= entry - 0.4*(entry-tp)`  
    → `pend`, `lock_sl = entry ± 0.35*dist`, שמירת `lock_pend_bar_time`
-2. `pend` — ב־POLL הראשון אחרי ש**התחיל** נר M5 הבא → `set_sl(lockSL)` ב־MT5 → `locked`, עדכון `stop` בסופבייס
+2. `pend` — ב־POLL הראשון אחרי ש**התחיל** נר M5 הבא → לפני `set_sl`:  
+   - `normalize_price` (digits/point) על `lock_sl`  
+   - לונג: חייב `lock_sl < bid`; שורט: `lock_sl > ask` — אחרת דילוג  
+   - מרחיקים לפחות `min_stop_distance × 1.2` מהמחיר; אם עדיין קרוב מדי → דילוג  
+   - בלוג: ערך מדויק שנשלח + `retcode` מלא בכשל  
+   - אחרת `set_sl` → `locked`
 3. `locked` — אין שינוי נוסף; TP נשאר קבוע
+
+בעליית הבוט נרשם ללוג `stops_level` של הסימבול (points ו־$).
 
 סגירה (נגיעת hi/lo):
 - `exit_reason=tp` — נגיעה ביעד
@@ -153,6 +160,7 @@ python bot.py
 
 ## היסטוריית שינויים
 
+- **2026-09-19** — נעילה: `normalize_price` (point grid) לפני set_sl; דילוג אם SL בצד הלא נכון של השוק; לוג `sent_sl`+`retcode`; רצפת stops×1.2.
 - **2026-09-19** — סנכרון סגירות: `history_deals_get(position=ticket)` אחרי טעינת טווח היסטוריה; בלי `order==ticket`; לא לסמן closed בלי OUT; ORPHAN בלוג; מיפוי DEAL_REASON תוקן (4=sl,5=tp); `resolve_exit_reason` לפי מחיר מול stop/tp/lock.
 - **2026-09-13** — Watchdog: `$PSScriptRoot`, `WATCHDOG_PYTHON` / `watchdog.local.ps1`; `.gitignore` ל־`heartbeat.txt` / `*.bak` / `*.log`.
 - **2026-09-13** — Heartbeat: אחרי כל `run_cycle` נכתב `heartbeat.txt`; `watchdog.ps1` ל־VPS (`C:\bots\xauusd`).

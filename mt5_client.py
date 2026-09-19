@@ -309,8 +309,12 @@ class MT5Client:
         return tick
 
     def normalize_price(self, price: float, symbol: str | Any) -> float:
+        """Snap to symbol digits / point grid (avoids 4377.422 on digits=2)."""
         info = symbol if hasattr(symbol, "digits") else self.symbol_info(symbol)
-        return round(float(price), info.digits)
+        digits = int(getattr(info, "digits", 2) or 2)
+        point = float(getattr(info, "point", 0) or 0) or (10 ** (-digits))
+        snapped = round(float(price) / point) * point
+        return round(snapped, digits)
 
     def normalize_volume(self, lots: float, symbol: str | Any) -> float:
         info = symbol if hasattr(symbol, "volume_step") else self.symbol_info(symbol)
@@ -414,7 +418,24 @@ class MT5Client:
             "magic": pos.magic,
         }
         result = api.order_send(request)
-        return self._from_result(result, ticket=ticket, sl=new_sl, tp=new_tp)
+        out = self._from_result(result, ticket=ticket, sl=new_sl, tp=new_tp)
+        if not out.ok:
+            # Keep exact sent levels visible for Invalid stops debugging.
+            err = out.error or out.comment or "set_sl_tp failed"
+            detail = (
+                f"{err} | sent sl={new_sl!r} tp={new_tp!r} "
+                f"retcode={out.retcode} comment={out.comment!r}"
+            )
+            return TradeResult(
+                ok=False,
+                ticket=ticket,
+                sl=new_sl,
+                tp=new_tp,
+                retcode=out.retcode,
+                comment=out.comment,
+                error=detail,
+            )
+        return out
 
     def set_sl(self, ticket: int, sl: float) -> TradeResult:
         return self.set_sl_tp(ticket, sl=sl)

@@ -515,12 +515,25 @@ def main() -> None:
 
     account = mt5.account()
     log.info("MT5 connected: login=%s server=%s", account.login, account.server)
+    symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
+    try:
+        info = mt5.symbol_info(symbol)
+        stops_pts = int(getattr(info, "trade_stops_level", 0) or 0)
+        stops_usd = float(mt5.min_stop_distance(symbol))
+        log.info(
+            "Symbol %s stops_level=%s points = $%.2f (lock floor uses ×1.2)",
+            symbol,
+            stops_pts,
+            stops_usd,
+        )
+    except Exception:
+        log.exception("Could not read stops_level for %s", symbol)
     log.info(
         "Bot started. poll=%ss dry_run=%s lot=%s symbol=%s",
         poll_sec,
         dry_run,
         env_float("LOT_SIZE", 0.01),
-        os.getenv("MT5_SYMBOL", "XAUUSD"),
+        symbol,
     )
 
     try:

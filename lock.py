@@ -48,6 +48,26 @@ def hit_lock_level(direction: str, entry: float, tp: float, high: float, low: fl
     return low <= entry - LOCK_HIT_FRAC * dist
 
 
+def clamp_lock_sl_to_broker(
+    direction: str,
+    lock_sl: float,
+    *,
+    price: float,
+    min_dist: float,
+) -> float:
+    """Keep lock SL on the correct side of price and ≥ min_dist*1.2 from market.
+
+    Long: SL must stay below bid → min(lock_sl, price - gap).
+    Short: SL must stay above ask → max(lock_sl, price + gap).
+    """
+    gap = max(min_dist * 1.2, 0.0)
+    if gap <= 0:
+        return lock_sl
+    if direction == "long":
+        return min(lock_sl, price - gap)
+    return max(lock_sl, price + gap)
+
+
 # Back-compat alias
 hit_50 = hit_lock_level
 
@@ -144,10 +164,76 @@ def manage_lock(
 
         lock_sl = _to_float(trade.get("lock_sl"))
         if lock_sl is None:
-            lock_sl = mt5.normalize_price(lock_sl_price(direction, entry, tp), symbol)
+            lock_sl = lock_sl_price(direction, entry, tp)
+
+        tick = mt5.tick(symbol)
+        bid = float(tick.bid)
+        ask = float(tick.ask)
+        # Long modifies against bid; short against ask.
+        price = bid if direction == "long" else ask
+        min_dist = float(mt5.min_stop_distance(symbol))
+        raw_sl = float(lock_sl)
+        lock_sl = clamp_lock_sl_to_broker(direction, raw_sl, price=price, min_dist=min_dist)
+        # Always snap to digits/point immediately before send (DB may store extra decimals).
+        lock_sl = mt5.normalize_price(lock_sl, symbol)
+        gap = abs(price - lock_sl)
+
+        # Wrong side of market after price reversed during pend wait → retry later.
+        if direction == "long" and not (lock_sl < bid):
+            log.info(
+                "Skip lock set_sl ticket=%s: long SL not below bid "
+                "(sl=%s bid=%s ask=%s) — retry next poll",
+                ticket,
+                lock_sl,
+                bid,
+                ask,
+            )
+            return trade
+        if direction == "short" and not (lock_sl > ask):
+            log.info(
+                "Skip lock set_sl ticket=%s: short SL not above ask "
+                "(sl=%s bid=%s ask=%s) — retry next poll",
+                ticket,
+                lock_sl,
+                bid,
+                ask,
+            )
+            return trade
+
+        if min_dist > 0 and gap < min_dist:
+            log.info(
+                "Skip lock set_sl ticket=%s: gap=%.2f < min_dist=%.2f "
+                "(price=%.2f raw_sl=%s adj_sl=%s) — retry next poll",
+                ticket,
+                gap,
+                min_dist,
+                price,
+                raw_sl,
+                lock_sl,
+            )
+            return trade
+
+        if abs(raw_sl - lock_sl) >= 1e-6:
+            log.info(
+                "Lock SL adjusted ticket=%s raw=%s → adj=%s "
+                "(price=%.2f min_dist=%.2f)",
+                ticket,
+                raw_sl,
+                lock_sl,
+                price,
+                min_dist,
+            )
 
         if dry_run:
-            log.info("DRY_RUN would set_sl ticket=%s → %s", ticket, lock_sl)
+            log.info(
+                "DRY_RUN would set_sl ticket=%s → %s (repr=%r price=%.2f gap=%.2f min_dist=%.2f)",
+                ticket,
+                lock_sl,
+                lock_sl,
+                price,
+                gap,
+                min_dist,
+            )
             payload = {"lock_state": "locked", "lock_sl": lock_sl, "stop": lock_sl}
             try:
                 update_trade(trade_id, payload)
@@ -155,11 +241,37 @@ def manage_lock(
                 log.debug("lock columns missing on dry_run write", exc_info=True)
             return {**trade, **payload}
 
+        log.info(
+            "Lock set_sl attempt ticket=%s sl=%s repr=%r bid=%.2f ask=%.2f gap=%.2f min_dist=%.2f",
+            ticket,
+            lock_sl,
+            lock_sl,
+            bid,
+            ask,
+            gap,
+            min_dist,
+        )
         result = mt5.set_sl(int(ticket), lock_sl)
         if not result.ok:
-            log.error("set_sl failed ticket=%s: %s", ticket, result.error or result.comment)
+            log.error(
+                "set_sl failed ticket=%s retcode=%s comment=%r error=%s sent_sl=%r",
+                ticket,
+                result.retcode,
+                result.comment,
+                result.error,
+                lock_sl,
+            )
             try:
-                update_trade(trade_id, {"mt5_error": f"lock set_sl failed: {result.error or result.comment}"[:500]})
+                update_trade(
+                    trade_id,
+                    {
+                        "mt5_error": (
+                            f"lock set_sl failed retcode={result.retcode} "
+                            f"comment={result.comment!r} sent_sl={lock_sl!r} "
+                            f"{result.error or ''}"
+                        )[:500]
+                    },
+                )
             except Exception:
                 pass
             return trade
@@ -180,7 +292,14 @@ def manage_lock(
                 log.exception("Could not write locked stop for %s", trade_id)
             return {**trade, "lock_state": "locked", "lock_sl": lock_sl, "stop": payload["stop"]}
 
-        log.info("Locked ticket=%s SL→%s at start of bar %s", ticket, lock_sl, forming_t.isoformat())
+        log.info(
+            "Locked ticket=%s SL→%s (repr=%r) retcode=%s at start of bar %s",
+            ticket,
+            lock_sl,
+            lock_sl,
+            result.retcode,
+            forming_t.isoformat(),
+        )
         return {**trade, **payload}
 
     return trade

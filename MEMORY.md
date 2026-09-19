@@ -14,7 +14,7 @@
 - הגנות: פילטר שעות ישראל (`12:00–14:30`, `22:00–00:00`), `MAX_AGE_SEC`, `MAX_SLIP_USD`, `MAX_OPEN`, claim על `copied_at`
 - פילטרים ב־`filters/`: `israel_hours`, `london_after_ny`, `us_holiday_next_day`, `ny_open` (15:20–15:30 IDT)
 - אחרי מילוי: `mt5_ticket` + `mt5_fill_price` (לא דורסים `entry` של היומן)
-- נעילה 40/35 מקומית: `none→pend→locked` על נרות M5; נוסחה מ־`entry`+`tp` של הוובהוק; נגיעה ב־40% → בנר הבא SL ל־35%
+- נעילה 40/35 מקומית: לפני set_sl — normalize ל־digits, בדיקת צד (לונג SL<bid / שורט SL>ask), רצפת stops×1.2, לוג retcode מלא
 - סגירה מ-MT5 → Supabase: deals לפי `position_id` אחרי טעינת היסטוריה; `exit_reason` לפי מחיר מול stop/tp/lock (לא מיפוי reason שבור)
 - יתומים: פוזיציית MAGIC ב־MT5 בלי שורת open → לוג ORPHAN (לא סוגר)
 - סנכרון פתוחות: PATCH לסופבייס רק אם profit/SL/TP השתנו (לא כל 5 שניות סתם)
