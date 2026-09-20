@@ -1,4 +1,10 @@
-# Optional watchdog overrides — copy to watchdog.local.ps1 on the VPS (gitignored).
+# Copy to watchdog.local.ps1 on the VPS (gitignored). Variables only.
+#
+# 1) Set Python to the interpreter that has MetaTrader5 + supabase installed.
+# 2) Keep $StaleSec high until heartbeat.txt is proven updating, then set 180.
+#
 # Example:
-# $Python = "C:\bots\xauusd\.venv\Scripts\python.exe"
-# $StaleSec = 120
+# $Python = "C:\Users\Administrator\.venv\Scripts\python.exe"
+# $StaleSec = 999999
+# After heartbeat check:
+# $StaleSec = 180

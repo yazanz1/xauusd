@@ -111,8 +111,12 @@
 
 אחרי כל סבב מוצלח (`run_cycle`) הבוט כותב `heartbeat.txt` בתיקיית הפרויקט (חותמת UTC).  
 `watchdog.ps1` בודק כל ~30 שניות: אם אין תהליך / הדופק ישן מ־90 שניות — מפעיל MT5 (אם צריך) ו־`python bot.py` מחדש.  
-`$BotDir` = תיקיית הסקריפט (`$PSScriptRoot`). Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.  
-תיקונים קבועים ל־VPS בלי להידרס ב־pull: `watchdog.local.ps1` (ב־`.gitignore`).  
+`$BotDir` = תיקיית הסקריפט (`$PSScriptRoot`).  
+`$EntryScript` = נתיב **מלא** ל־`bot.py` (לא יחסי).  
+`Start-Bot` מפנה stdout/stderr ל־`bot_out.log` / `bot_err.log` (ברירת מחדל בריפו).  
+Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.  
+תיקונים מקומיים ל־VPS בלי להידרס ב־pull: `watchdog.local.ps1` — **רק משתנים** (`$Python`, `$StaleSec`).  
+סדר בטוח: קודם לוודא ש־`heartbeat.txt` מתעדכן, ורק אז `$StaleSec = 180` ב־local.  
 על VPS: משימת Scheduler אחת ב־**AtLogOn** בלבד.
 
 
@@ -160,6 +164,7 @@ python bot.py
 
 ## היסטוריית שינויים
 
+- **2026-09-20** — Watchdog: `$EntryScript` נתיב מלא; redirect ל־`bot_out.log`/`bot_err.log` ב־Start-Bot; `watchdog.local.ps1` רק למשתנים.
 - **2026-09-19** — נעילה: `normalize_price` (point grid) לפני set_sl; דילוג אם SL בצד הלא נכון של השוק; לוג `sent_sl`+`retcode`; רצפת stops×1.2.
 - **2026-09-19** — סנכרון סגירות: `history_deals_get(position=ticket)` אחרי טעינת טווח היסטוריה; בלי `order==ticket`; לא לסמן closed בלי OUT; ORPHAN בלוג; מיפוי DEAL_REASON תוקן (4=sl,5=tp); `resolve_exit_reason` לפי מחיר מול stop/tp/lock.
 - **2026-09-13** — Watchdog: `$PSScriptRoot`, `WATCHDOG_PYTHON` / `watchdog.local.ps1`; `.gitignore` ל־`heartbeat.txt` / `*.bak` / `*.log`.

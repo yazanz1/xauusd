@@ -2,16 +2,22 @@
 # Run: powershell -ExecutionPolicy Bypass -File .\watchdog.ps1
 # Schedule: Task Scheduler AtLogOn only (MT5 needs an interactive session).
 #
-# Optional permanent overrides (not in git): create watchdog.local.ps1 next to this file, e.g.
-#   $Python = "C:\bots\xauusd\.venv\Scripts\python.exe"
+# VPS-only overrides (gitignored): create watchdog.local.ps1 next to this file, e.g.
+#   $Python = "C:\Users\Administrator\.venv\Scripts\python.exe"
+#   $StaleSec = 180   # only after heartbeat.txt is proven fresh
 # Or set WATCHDOG_PYTHON=... in .env
+#
+# Do NOT put Redirect*/Start-Process logic in local — those live here as defaults.
 
 $BotDir = if ($PSScriptRoot) { $PSScriptRoot } else { "C:\bots\xauusd" }
-$EntryScript = "bot.py"
+# Full path required: relative "bot.py" broke process detection (multiple bots).
+$EntryScript = Join-Path $BotDir "bot.py"
 $HeartbeatFile = Join-Path $BotDir "heartbeat.txt"
 $StaleSec = 90
 $CheckEverySec = 30
 $LogFile = Join-Path $BotDir "watchdog.log"
+$BotOutLog = Join-Path $BotDir "bot_out.log"
+$BotErrLog = Join-Path $BotDir "bot_err.log"
 
 $EnvFile = Join-Path $BotDir ".env"
 $Mt5Path = $null
@@ -40,7 +46,7 @@ if ($PythonFromEnv -and (Test-Path $PythonFromEnv)) {
     $Python = "python"
 }
 
-# Local overrides survive git pull (file is gitignored).
+# Local overrides survive git pull (file is gitignored). Variables only.
 $LocalOverride = Join-Path $BotDir "watchdog.local.ps1"
 if (Test-Path $LocalOverride) {
     . $LocalOverride
@@ -53,17 +59,15 @@ function Write-Log([string]$msg) {
 }
 
 function Get-BotProcesses {
-    # Match bot.py for this folder. Do not require ExecutablePath under $BotDir:
+    # Match this project's bot by full script path in CommandLine.
     # Windows venv redirector often runs base Python311\python.exe as the child.
-    $scriptNeedle = Join-Path $BotDir $EntryScript
+    $scriptName = [System.IO.Path]::GetFileName($EntryScript)
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
             if (-not $_.CommandLine) { return $false }
             $cl = $_.CommandLine
-            ($cl -like "*$EntryScript*") -and (
-                ($cl -like "*$BotDir*") -or
-                ($cl -like "*$scriptNeedle*") -or
-                ($cl -match [regex]::Escape($EntryScript) + '\s*$')
+            ($cl -like "*$EntryScript*") -or (
+                ($cl -like "*$scriptName*") -and ($cl -like "*$BotDir*")
             )
         }
 }
@@ -93,10 +97,17 @@ function Start-Bot {
         Write-Log "Bot already running (pids: $($existing.ProcessId -join ', '))"
         return
     }
-    Write-Log "Starting bot: $Python $EntryScript"
+    if (-not (Test-Path $EntryScript)) {
+        Write-Log "Entry script missing: $EntryScript"
+        return
+    }
+    Write-Log "Starting bot: $Python $EntryScript (out=$BotOutLog err=$BotErrLog)"
+    # Redirect lives here (not overridable from local.ps1). Overwrites on each start.
     Start-Process -FilePath $Python `
         -ArgumentList "`"$EntryScript`"" `
         -WorkingDirectory $BotDir `
+        -RedirectStandardOutput $BotOutLog `
+        -RedirectStandardError $BotErrLog `
         -WindowStyle Minimized
 }
 
@@ -110,7 +121,7 @@ function Restart-Bot {
     Start-Bot
 }
 
-Write-Log "Watchdog started. bot=$BotDir stale=${StaleSec}s python=$Python"
+Write-Log "Watchdog started. bot=$BotDir entry=$EntryScript stale=${StaleSec}s python=$Python"
 Start-Bot
 
 while ($true) {
