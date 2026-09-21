@@ -7,6 +7,7 @@ already-open logged-in terminal. Exposes market open, SL/TP, trailing, close.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import time
 from ctypes import wintypes
@@ -21,6 +22,54 @@ except ImportError:  # pragma: no cover - only missing before pip install
     mt5 = None
 
 Side = Literal["buy", "sell"]
+
+log = logging.getLogger("xaubot.mt5")
+_OFFSET_FILE = Path(__file__).resolve().parent / "server_utc_offset.txt"
+
+
+def resolve_server_utc_offset(
+    tick_time: int,
+    utc_now: datetime,
+    cached: timedelta | None,
+    *,
+    fresh_seconds: int = 120,
+) -> tuple[timedelta, bool]:
+    """Broker server clock minus UTC, as a whole number of hours.
+
+    `tick_time` is server time stored as a unix-shaped integer (not UTC).
+    A fresh tick matches `utc_now` under exactly one whole-hour offset.
+    A stale tick (weekend) does not — caller keeps `cached`.
+    """
+    utc_ts = utc_now.timestamp()
+    best_err: float | None = None
+    best_hours = 0
+    for hours in range(-12, 15):
+        err = abs((int(tick_time) - hours * 3600) - utc_ts)
+        if best_err is None or err < best_err:
+            best_err = err
+            best_hours = hours
+    if best_err is not None and best_err <= fresh_seconds:
+        return timedelta(hours=best_hours), True
+    if cached is not None:
+        return cached, False
+    return timedelta(0), False
+
+
+def _load_server_offset() -> timedelta | None:
+    try:
+        raw = _OFFSET_FILE.read_text(encoding="utf-8").strip()
+        return timedelta(hours=int(raw))
+    except (OSError, ValueError):
+        return None
+
+
+def _save_server_offset(offset: timedelta) -> None:
+    hours = int(round(offset.total_seconds() / 3600))
+    try:
+        _OFFSET_FILE.write_text(str(hours), encoding="utf-8")
+    except OSError:
+        log.warning("Could not save server UTC offset")
+
 
 WM_COMMAND = 0x0111
 MT_WMCMD_EXPERTS = 32851
@@ -95,6 +144,7 @@ class MT5Client:
         self.server = server
         self.magic = magic
         self.deviation = deviation
+        self._server_utc_offset = _load_server_offset()
 
     @classmethod
     def from_env(cls, *, magic: int = 0, deviation: int = 30) -> MT5Client:
@@ -307,6 +357,35 @@ class MT5Client:
         if tick is None:
             raise MT5Error(f"No tick for {symbol}: {api.last_error()}")
         return tick
+
+    def server_utc_offset(self, symbol: str) -> timedelta:
+        """Server clock minus UTC. Fresh ticks update the cache; stale ticks reuse it."""
+        tick = self.tick(symbol)
+        offset, fresh = resolve_server_utc_offset(
+            int(tick.time),
+            datetime.now(timezone.utc),
+            self._server_utc_offset,
+        )
+        if fresh:
+            if offset != self._server_utc_offset:
+                log.info("Server UTC offset %s hours", int(offset.total_seconds() // 3600))
+            self._server_utc_offset = offset
+            _save_server_offset(offset)
+            return offset
+        if self._server_utc_offset is not None:
+            log.info(
+                "Stale tick for %s — using cached server UTC offset %s hours",
+                symbol,
+                int(self._server_utc_offset.total_seconds() // 3600),
+            )
+            return self._server_utc_offset
+        log.warning("Stale tick for %s and no cached offset — deal times left as UTC", symbol)
+        return timedelta(0)
+
+    def deal_time_to_utc(self, deal_time: int, symbol: str) -> datetime:
+        """Convert an MT5 deal.time (server clock) to UTC."""
+        as_utc = datetime.fromtimestamp(int(deal_time), tz=timezone.utc)
+        return as_utc - self.server_utc_offset(symbol)
 
     def normalize_price(self, price: float, symbol: str | Any) -> float:
         """Snap to symbol digits / point grid (avoids 4377.422 on digits=2)."""

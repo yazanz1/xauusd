@@ -54,18 +54,20 @@ def clamp_lock_sl_to_broker(
     *,
     price: float,
     min_dist: float,
+    fill_price: float,
 ) -> float:
-    """Keep lock SL on the correct side of price and ≥ min_dist*1.2 from market.
+    """Pull SL away from the market, but never through the fill.
 
-    Long: SL must stay below bid → min(lock_sl, price - gap).
-    Short: SL must stay above ask → max(lock_sl, price + gap).
+    Call only when lock_sl is already on the profit side of price.
+    Long: SL stays below bid and at or above mt5_fill_price.
+    Short: SL stays above ask and at or below mt5_fill_price.
     """
     gap = max(min_dist * 1.2, 0.0)
-    if gap <= 0:
-        return lock_sl
     if direction == "long":
-        return min(lock_sl, price - gap)
-    return max(lock_sl, price + gap)
+        adjusted = lock_sl if gap <= 0 else min(lock_sl, price - gap)
+        return max(adjusted, fill_price)
+    adjusted = lock_sl if gap <= 0 else max(lock_sl, price + gap)
+    return min(adjusted, fill_price)
 
 
 # Back-compat alias
@@ -169,34 +171,66 @@ def manage_lock(
         tick = mt5.tick(symbol)
         bid = float(tick.bid)
         ask = float(tick.ask)
-        # Long modifies against bid; short against ask.
         price = bid if direction == "long" else ask
         min_dist = float(mt5.min_stop_distance(symbol))
         raw_sl = float(lock_sl)
-        lock_sl = clamp_lock_sl_to_broker(direction, raw_sl, price=price, min_dist=min_dist)
-        # Always snap to digits/point immediately before send (DB may store extra decimals).
+        fill = _to_float(trade.get("mt5_fill_price"))
+        if fill is None:
+            log.info(
+                "Skip lock set_sl ticket=%s: missing mt5_fill_price — retry next poll",
+                ticket,
+            )
+            return trade
+
+        # Wrong side before clamp. Clamping first can shove SL through the fill
+        # and stop the position out at a loss (ticket 2057249374).
+        if direction == "long" and raw_sl >= bid:
+            log.info(
+                "Skip lock set_sl ticket=%s: long SL not below bid before clamp "
+                "(sl=%s bid=%s ask=%s fill=%s) — retry next poll",
+                ticket,
+                raw_sl,
+                bid,
+                ask,
+                fill,
+            )
+            return trade
+        if direction == "short" and raw_sl <= ask:
+            log.info(
+                "Skip lock set_sl ticket=%s: short SL not above ask before clamp "
+                "(sl=%s bid=%s ask=%s fill=%s) — retry next poll",
+                ticket,
+                raw_sl,
+                bid,
+                ask,
+                fill,
+            )
+            return trade
+
+        lock_sl = clamp_lock_sl_to_broker(
+            direction, raw_sl, price=price, min_dist=min_dist, fill_price=fill
+        )
         lock_sl = mt5.normalize_price(lock_sl, symbol)
         gap = abs(price - lock_sl)
 
-        # Wrong side of market after price reversed during pend wait → retry later.
         if direction == "long" and not (lock_sl < bid):
             log.info(
-                "Skip lock set_sl ticket=%s: long SL not below bid "
-                "(sl=%s bid=%s ask=%s) — retry next poll",
+                "Skip lock set_sl ticket=%s: clamped long SL not below bid "
+                "(sl=%s bid=%s fill=%s) — retry next poll",
                 ticket,
                 lock_sl,
                 bid,
-                ask,
+                fill,
             )
             return trade
         if direction == "short" and not (lock_sl > ask):
             log.info(
-                "Skip lock set_sl ticket=%s: short SL not above ask "
-                "(sl=%s bid=%s ask=%s) — retry next poll",
+                "Skip lock set_sl ticket=%s: clamped short SL not above ask "
+                "(sl=%s ask=%s fill=%s) — retry next poll",
                 ticket,
                 lock_sl,
-                bid,
                 ask,
+                fill,
             )
             return trade
 

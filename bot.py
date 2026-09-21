@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from supabase import Client, create_client
@@ -29,6 +30,8 @@ TABLE = "gold_trades"
 MAGIC = 260831
 DEAL_ENTRY_OUT = 1
 DEAL_ENTRY_INOUT = 2
+TRACK_DAYS = 7
+DATE_TZ = ZoneInfo("Asia/Jerusalem")
 
 # Official MetaTrader5 DEAL_REASON_* values (verified against package constants).
 EXIT_REASONS = {
@@ -112,11 +115,19 @@ def fetch_new_signals(db: Client) -> list[dict[str, Any]]:
 
 
 def fetch_open_copied(db: Client) -> list[dict[str, Any]]:
+    """Rows the bot still owns: a ticket, no MT5 close yet, inside the last 7 Israel days.
+
+    Webhook owns `status`. Do not filter on it — a journal close must not drop
+    a live position (ticket 2057894665). Older rows without mt5_closed_at are
+    left for resync, not the 5s loop.
+    """
+    cutoff = (datetime.now(DATE_TZ).date() - timedelta(days=TRACK_DAYS)).isoformat()
     result = (
         db.table(TABLE)
         .select("*")
-        .eq("status", "open")
+        .gte("date_idt", cutoff)
         .not_.is_("mt5_ticket", "null")
+        .is_("mt5_closed_at", "null")
         .execute()
     )
     return result.data or []
@@ -339,34 +350,23 @@ def check_orphans(db: Client, mt5: MT5Client) -> None:
         ticket = int(pos.ticket)
         if ticket not in tracked:
             log.error(
-                "ORPHAN: position %s open in MT5 but not managed (no status=open row)",
+                "ORPHAN: position %s open in MT5 but not in the bot track "
+                "(no mt5_ticket row with mt5_closed_at null in the last %s days)",
                 ticket,
+                TRACK_DAYS,
             )
 
 
 def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     ticket = int(trade["mt5_ticket"])
-    direction = (trade.get("direction") or "").lower()
-    # Journal pips use webhook entry (1:1 with Pine); fill is kept in mt5_fill_price.
-    journal_entry = to_float(trade.get("entry"))
-    fill_entry = to_float(trade.get("mt5_fill_price")) or journal_entry
     pos = mt5.get_position(ticket)
 
     if pos is not None:
         floating = round(float(pos.profit + pos.swap), 2)
-        new_sl = float(pos.sl) if pos.sl else 0.0
-        new_tp = float(pos.tp) if pos.tp else 0.0
         prev_profit = to_float(trade.get("mt5_profit"))
-        if prev_profit is None:
-            prev_profit = to_float(trade.get("usd_0_3"))
-        prev_sl = to_float(trade.get("stop"))
-        prev_tp = to_float(trade.get("tp"))
-
         profit_changed = prev_profit is None or abs(prev_profit - floating) >= 0.01
-        sl_changed = prev_sl is None or abs(prev_sl - new_sl) >= 1e-6
-        tp_changed = prev_tp is None or abs(prev_tp - new_tp) >= 1e-6
 
-        if not (profit_changed or sl_changed or tp_changed):
+        if not profit_changed:
             log.debug(
                 "Open ticket=%s unchanged floating=%s lock=%s",
                 ticket,
@@ -375,17 +375,7 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
             )
             return
 
-        payload = {
-            "stop": pos.sl,
-            "tp": pos.tp,
-            "mt5_profit": floating,
-        }
-        try:
-            update_trade(db, trade["id"], payload)
-        except Exception:
-            payload.pop("mt5_profit", None)
-            payload["usd_0_3"] = floating
-            update_trade(db, trade["id"], payload)
+        update_trade(db, trade["id"], {"mt5_profit": floating})
         log.info("Open ticket=%s floating=%s lock=%s", ticket, floating, trade.get("lock_state") or "none")
         return
 
@@ -414,36 +404,25 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         2,
     )
     exit_price = float(last.price)
-    exit_dt = datetime.fromtimestamp(last.time, tz=timezone.utc)
+    symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
+    exit_dt = mt5.deal_time_to_utc(int(last.time), symbol)
     mt5_reason = deal_exit_reason(int(last.reason))
     exit_reason = resolve_exit_reason(trade, exit_price=exit_price, mt5_reason=mt5_reason)
-    pips = calc_pips(direction, journal_entry or fill_entry, exit_price)
     payload = {
-        "status": "closed",
-        "exit": exit_price,
-        "exit_time": iso(exit_dt),
-        "exit_reason": exit_reason,
-        "pips": pips,
-        "usd_0_3": profit,
         "mt5_close_price": exit_price,
         "mt5_closed_at": iso(exit_dt),
         "mt5_profit": profit,
+        "mt5_exit_reason": exit_reason,
     }
-    try:
-        update_trade(db, trade["id"], payload)
-    except Exception:
-        for key in ("mt5_close_price", "mt5_closed_at", "mt5_profit"):
-            payload.pop(key, None)
-        update_trade(db, trade["id"], payload)
-        log.warning("mt5 close columns missing — wrote classic close fields only")
+    update_trade(db, trade["id"], payload)
 
     log.info(
-        "Closed ticket=%s reason=%s exit=%s profit=%s pips=%s",
+        "MT5 close ticket=%s mt5_exit_reason=%s exit=%s profit=%s closed_at=%s",
         ticket,
         exit_reason,
         exit_price,
         profit,
-        pips,
+        payload["mt5_closed_at"],
     )
 
 

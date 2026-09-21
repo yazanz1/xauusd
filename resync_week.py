@@ -1,21 +1,22 @@
-"""One-shot: recompute closes from MT5 position deals (from 2026-09-14).
+"""One-shot: fill MT5 close columns from position deals.
 
-Default is DRY-RUN (no writes). To apply:
+Default is DRY-RUN (no writes). Writes only mt5_close_price, mt5_closed_at,
+mt5_profit, mt5_exit_reason. Does not touch Pine fields (status, exit,
+exit_reason, pips, usd_0_3).
 
-  python resync_week.py                     # compare only (default)
-  python resync_week.py --apply             # write after you reviewed dry-run
+  python resync_week.py --from-date 2026-09-07
+  python resync_week.py --apply --from-date 2026-09-07
 
-Uses history_deals_by_position + resolve_exit_reason (same as bot sync fix).
-Does NOT touch open positions that still have no OUT deal.
-Does NOT touch watchdog.ps1.
+Run --apply only after the updated bot is deployed, and only after reviewing
+the dry-run table.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import sys
-from datetime import date, datetime, timezone
+import os
+from datetime import date
 from typing import Any
 
 from dotenv import load_dotenv
@@ -24,7 +25,6 @@ from bot import (
     DEAL_ENTRY_INOUT,
     DEAL_ENTRY_OUT,
     TABLE,
-    calc_pips,
     connect_supabase,
     deal_exit_reason,
     iso,
@@ -56,9 +56,6 @@ def fetch_copied_since(db, from_date: date) -> list[dict[str, Any]]:
 def recompute_from_deals(mt5: MT5Client, trade: dict[str, Any]) -> dict[str, Any] | None:
     """Return proposed close fields, or None if position still open / no OUT deal."""
     ticket = int(trade["mt5_ticket"])
-    direction = (trade.get("direction") or "").lower()
-    journal_entry = to_float(trade.get("entry"))
-    fill_entry = to_float(trade.get("mt5_fill_price")) or journal_entry
 
     if mt5.get_position(ticket) is not None:
         return None  # still open — do not invent a close
@@ -80,21 +77,16 @@ def recompute_from_deals(mt5: MT5Client, trade: dict[str, Any]) -> dict[str, Any
         2,
     )
     exit_price = float(last.price)
-    exit_dt = datetime.fromtimestamp(last.time, tz=timezone.utc)
+    symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
+    exit_dt = mt5.deal_time_to_utc(int(last.time), symbol)
     mt5_reason = deal_exit_reason(int(last.reason))
-    exit_reason = resolve_exit_reason(trade, exit_price=exit_price, mt5_reason=mt5_reason)
-    pips = calc_pips(direction, journal_entry or fill_entry, exit_price)
+    mt5_exit_reason = resolve_exit_reason(trade, exit_price=exit_price, mt5_reason=mt5_reason)
 
     return {
-        "status": "closed",
-        "exit": exit_price,
-        "exit_time": iso(exit_dt),
-        "exit_reason": exit_reason,
-        "pips": pips,
-        "usd_0_3": profit,
         "mt5_close_price": exit_price,
         "mt5_closed_at": iso(exit_dt),
         "mt5_profit": profit,
+        "mt5_exit_reason": mt5_exit_reason,
         "_mt5_reason": mt5_reason,
         "_deal_time": exit_dt,
     }
@@ -157,8 +149,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print()
     print(
-        f"{'ticket':<12} {'old_reason':<10} {'new_reason':<10} "
-        f"{'old_pnl':>10} {'new_pnl':>10} {'old_exit':>10} {'new_exit':>10} {'note'}"
+        f"{'ticket':<12} {'old_mt5':<10} {'new_mt5':<10} "
+        f"{'old_pnl':>10} {'new_pnl':>10} {'old_px':>10} {'new_px':>10} {'note'}"
     )
     print("-" * 100)
 
@@ -175,11 +167,9 @@ def main(argv: list[str] | None = None) -> int:
 
     for trade in rows:
         ticket = int(trade["mt5_ticket"])
-        old_reason = trade.get("exit_reason")
+        old_reason = trade.get("mt5_exit_reason")
         old_profit = to_float(trade.get("mt5_profit"))
-        if old_profit is None:
-            old_profit = to_float(trade.get("usd_0_3"))
-        old_exit = to_float(trade.get("exit")) or to_float(trade.get("mt5_close_price"))
+        old_exit = to_float(trade.get("mt5_close_price"))
 
         try:
             proposed = recompute_from_deals(mt5, trade)
@@ -202,9 +192,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             continue
 
-        new_reason = proposed["exit_reason"]
+        new_reason = proposed["mt5_exit_reason"]
         new_profit = float(proposed["mt5_profit"])
-        new_exit = float(proposed["exit"])
+        new_exit = float(proposed["mt5_close_price"])
 
         comparable += 1
         if old_profit is not None:
@@ -214,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
         reason_diff = (old_reason or "") != (new_reason or "")
         profit_diff = _profit_changed(old_profit, new_profit)
         exit_diff = _profit_changed(old_exit, new_exit, tol=0.005)
-        any_diff = reason_diff or profit_diff or exit_diff or (trade.get("status") != "closed")
+        closed_missing = trade.get("mt5_closed_at") is None
+        any_diff = reason_diff or profit_diff or exit_diff or closed_missing
 
         if reason_diff:
             reason_changes += 1
@@ -227,9 +218,9 @@ def main(argv: list[str] | None = None) -> int:
         if profit_diff:
             notes.append("PNL")
         if exit_diff:
-            notes.append("EXIT")
-        if trade.get("status") != "closed":
-            notes.append("WAS_" + str(trade.get("status") or "?").upper())
+            notes.append("PX")
+        if closed_missing:
+            notes.append("NO_MT5_CLOSE")
         if not notes:
             notes.append("same")
 
@@ -247,15 +238,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         payload = {
-            "status": proposed["status"],
-            "exit": proposed["exit"],
-            "exit_time": proposed["exit_time"],
-            "exit_reason": proposed["exit_reason"],
-            "pips": proposed["pips"],
-            "usd_0_3": proposed["usd_0_3"],
             "mt5_close_price": proposed["mt5_close_price"],
             "mt5_closed_at": proposed["mt5_closed_at"],
             "mt5_profit": proposed["mt5_profit"],
+            "mt5_exit_reason": proposed["mt5_exit_reason"],
             "mt5_error": resync_tag,
         }
         try:
@@ -274,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Still open:        {skip_open}")
     print(f"No OUT deal:       {skip_no_deal}")
     print(f"Errors:            {errors}")
-    print(f"exit_reason diffs: {reason_changes}")
+    print(f"mt5_exit_reason diffs: {reason_changes}")
     print(f"mt5_profit diffs:  {profit_changes}")
     print(f"Would write:       {would_write}")
     if apply:

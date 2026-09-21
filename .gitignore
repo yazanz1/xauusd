@@ -14,3 +14,4 @@ bot.log
 *.bak
 heartbeat.txt
 watchdog.local.ps1
+server_utc_offset.txt

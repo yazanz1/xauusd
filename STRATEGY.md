@@ -1,6 +1,6 @@
 # אסטרטגיית xaubot
 
-עודכן לאחרונה: 2026-09-19
+עודכן לאחרונה: 2026-09-21
 
 בוט העתקה: קורא איתותים מ-Supabase ופותח אותם בחשבון MT5 (מקומי או VPS).  
 הבוט **לא** מייצר איתותים. האיתות נוצר במקור חיצוני (טבלת `gold_trades`).  
@@ -78,12 +78,11 @@
    - לונג: `high >= entry + 0.4*(tp-entry)`  
    - שורט: `low <= entry - 0.4*(entry-tp)`  
    → `pend`, `lock_sl = entry ± 0.35*dist`, שמירת `lock_pend_bar_time`
-2. `pend` — ב־POLL הראשון אחרי ש**התחיל** נר M5 הבא → לפני `set_sl`:  
-   - `normalize_price` (digits/point) על `lock_sl`  
-   - לונג: חייב `lock_sl < bid`; שורט: `lock_sl > ask` — אחרת דילוג  
-   - מרחיקים לפחות `min_stop_distance × 1.2` מהמחיר; אם עדיין קרוב מדי → דילוג  
-   - בלוג: ערך מדויק שנשלח + `retcode` מלא בכשל  
-   - אחרת `set_sl` → `locked`
+2. `pend` — ב־POLL הראשון אחרי ש**התחיל** נר M5 הבא, לפני `set_sl`:  
+   - אם `lock_sl` בצד הלא נכון של המחיר (לונג `>= bid`, שורט `<= ask`) — דילוג **לפני** הקלאמפ  
+   - קלאמפ מרחיק מהמחיר לפחות `min_stop_distance × 1.2`, ולא חוצה את `mt5_fill_price` (לונג לא מתחת, שורט לא מעל)  
+   - `normalize_price` ואז `set_sl` → `locked`  
+   - בלוג: ערך שנשלח + `retcode`
 3. `locked` — אין שינוי נוסף; TP נשאר קבוע
 
 בעליית הבוט נרשם ללוג `stops_level` של הסימבול (points ו־$).
@@ -98,14 +97,24 @@
 
 ## סגירה (מ-MT5 חזרה ל-Supabase)
 
-כל סריקה, לכל שורה `open` עם ticket:
-- פתוחה ב-MT5 → עדכון `mt5_profit` / SL/TP **רק אם השתנו** (סף רווח $0.01)
-- נסגרה ב-MT5 → רק אם יש deal יציאה עם `position_id` = הטיקט (`history_deals_get(position=...)`). **לא** לפי `order` ו**לא** לפי חלון זמן בלבד
-- בלי פוזיציה ובלי OUT deal של אותה פוזיציה → **לא** מסמנים `closed`
-- אחרי הסנכרון: בדיקת יתומים — פוזיציית MAGIC ב־MT5 בלי שורת `status=open` → לוג `ORPHAN` בלבד (לא סוגר אוטומטית)
+מעקב הבוט: `mt5_ticket` לא ריק, `mt5_closed_at` ריק, ו־`date_idt` ב־7 הימים האחרונים (שעון ישראל). לא לפי `status`.
+
+כל סריקה, לכל שורה כזו:
+- פתוחה ב-MT5 → עדכון `mt5_profit` רק אם השתנה (סף $0.01). בלי לגעת ב־`stop` / `tp` / `usd_0_3`
+- נסגרה ב-MT5 → רק אם יש OUT deal עם `position_id` = הטיקט. נכתבים `mt5_close_price`, `mt5_closed_at` (UTC), `mt5_profit`, `mt5_exit_reason`
+- `deal.time` הוא שעון שרת הברוקר. ממירים ל-UTC לפי הפרש שעות שלמות מול `tick.time`. טיק ישן (סוף שבוע) משתמש בהפרש האחרון שנשמר
+- הבוט **לא** כותב `status`, `exit`, `exit_reason`, `pips`, `usd_0_3` — אלה של ה-Pine
+- בלי פוזיציה ובלי OUT deal → לא נכתב `mt5_closed_at`
+- יתום: פוזיציית MAGIC בלי שורה במעקב → לוג `ORPHAN` בלבד
 
 הבוט **לא** סוגר יזום — הסגירה מגיעה מ-SL/TP ב-MT5 (או ידני בטרמינל).  
 בהתחברות/סריקה: אם Algo Trading כבוי — הבוט מדליק אותו אוטומטית.
+
+### נקודת חיתוך — 2026-09-21
+
+לפני התאריך הזה, בשורות עם `mt5_ticket`, השדות `exit` / `exit_reason` משקפים את MT5 (הבוט וה-resync דרסו את מה שה-Pine שלח). אי אפשר לשחזר את ערכי ה-Pine המקוריים שלהן.  
+מהתאריך הזה: `exit` / `exit_reason` הם של ה-Pine. הביצוע בברוקר נמצא ב־`mt5_exit_reason`, `mt5_profit`, `mt5_closed_at`.  
+שורות בלי `mt5_ticket` תמיד היו ותמיד יישארו של ה-Pine.
 
 ## Heartbeat + watchdog
 
@@ -154,7 +163,7 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-ב-Supabase להריץ פעם אחת אם חסר: `sql/mt5_bridge_columns.sql` ו־`sql/lock_columns.sql`.
+ב-Supabase להריץ פעם אחת אם חסר: `sql/mt5_bridge_columns.sql`, `sql/lock_columns.sql`, `sql/mt5_exit_reason.sql`.
 
 ב-`.env`: Supabase + MT5. ברירת מחדל `DRY_RUN=0` (מסחר חי).
 
@@ -164,6 +173,7 @@ python bot.py
 
 ## היסטוריית שינויים
 
+- **2026-09-21** — הפרדת יומן/ביצוע: הבוט עוקב 7 ימים לפי `mt5_ticket` + `mt5_closed_at` (לא `status`); כותב `mt5_exit_reason` ולא נוגע ב־`exit`/`exit_reason`/`usd_0_3`. נעילה: דילוג לפני קלאמפ אם SL בצד הלא נכון; קלאמפ לא חוצה `mt5_fill_price`. `deal.time` → UTC לפי offset שעתי, עם cache כשהטיק ישן.
 - **2026-09-20** — Watchdog: `$EntryScript` נתיב מלא; redirect ל־`bot_out.log`/`bot_err.log` ב־Start-Bot; `watchdog.local.ps1` רק למשתנים.
 - **2026-09-19** — נעילה: `normalize_price` (point grid) לפני set_sl; דילוג אם SL בצד הלא נכון של השוק; לוג `sent_sl`+`retcode`; רצפת stops×1.2.
 - **2026-09-19** — סנכרון סגירות: `history_deals_get(position=ticket)` אחרי טעינת טווח היסטוריה; בלי `order==ticket`; לא לסמן closed בלי OUT; ORPHAN בלוג; מיפוי DEAL_REASON תוקן (4=sl,5=tp); `resolve_exit_reason` לפי מחיר מול stop/tp/lock.
