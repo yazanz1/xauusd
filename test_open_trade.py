@@ -21,7 +21,7 @@ def main() -> int:
         print("TEST_SIDE must be buy or sell")
         return 1
 
-    client = MT5Client.from_env(magic=260831)
+    client = MT5Client.from_env(magic=260860)
     try:
         client.connect()
     except MT5Error as exc:
@@ -56,7 +56,7 @@ def main() -> int:
         sl=sl,
         tp=tp,
         comment="xaubot-test",
-        magic=260831,
+        magic=260860,
     )
     if not result.ok:
         print(f"OPEN FAILED: {result.error or result.comment}")

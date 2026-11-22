@@ -1,7 +1,10 @@
-"""Signal filters for xaubot.
+"""Signal filters for xaubot (package bot1_filters).
 
-Each filter is its own module under filters/. The bot runs active_filters()
-before opening a signal. Do not invent trading rules; only implement what is asked.
+Each filter is its own module. The bot runs active_filters() before opening.
+Do not invent trading rules; only implement what is asked.
+
+Filter modules under this package are kept for reference / future use.
+For wick (+60) the bot never loads them — Pine owns entry filters.
 """
 
 from __future__ import annotations
@@ -44,15 +47,9 @@ def run_filters(
 
 
 def active_filters() -> list[SignalFilter]:
-    """Filter chain used before MT5 open."""
-    from filters.israel_hours import IsraelHoursFilter
-    from filters.london_after_ny import LondonAfterNyFilter
-    from filters.ny_open import NyOpenFilter
-    from filters.us_holiday_next_day import UsHolidayNextDayFilter
+    """Always empty for wick (+60). Does not read STRATEGY from .env.
 
-    return [
-        IsraelHoursFilter(),
-        LondonAfterNyFilter(),
-        UsHolidayNextDayFilter(),
-        NyOpenFilter(),
-    ]
+    Pine already applies F1+F3+F4+F5 / hours / news / holidays.
+    Filter modules remain in this package but are not loaded.
+    """
+    return []

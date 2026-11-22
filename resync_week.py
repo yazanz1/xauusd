@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(description="Resync gold_trades closes from MT5 deals")
+    parser = argparse.ArgumentParser(description="Resync wick_strategy closes from MT5 deals")
     parser.add_argument(
         "--from-date",
         default=FROM_DATE.isoformat(),

@@ -5,33 +5,27 @@ alwaysApply: true
 
 # xaubot strategy memory
 
-This project copies `gold_trades` signals from Supabase (`pcieshmxxwplaodkrqet`) into MT5 (local or Windows VPS).
+This project copies `wick_strategy` (+60) signals from Supabase (`pcieshmxxwplaodkrqet`) into MT5 (local or Windows VPS). MAGIC `260860`.
 
-Current rules (2026-09-12):
+Current rules (2026-11-22):
 
 - Poll every `POLL_SEC` seconds (default 5). Immediate scan on startup.
+- Startup log: `wick table=wick_strategy magic=260860 filters=[]`.
 - New signal = `status=open` and `mt5_ticket` is null. Market order only: long=BUY, short=SELL.
-- Filters live under `filters/` (one file each); `active_filters()` runs before open.
-- First filter `israel_hours`: no new entries during Israel `[12:00,14:30)` and `[22:00,24:00)`.
-- Second filter `london_after_ny`: from Israel `15:30` block `color=london`; allow `yellow` and `ny`.
-- Third filter `us_holiday_next_day`: on next weekday after observed US holiday, new entries only until `10:00` IDT; open trades continue.
-- Fourth filter `ny_open`: every day no new entries Israel `[15:20,15:30)` (NY cash open / fake liquidity).
-- Guards before open: filters, `MAX_AGE_SEC`, `MAX_SLIP_USD`, `MAX_OPEN`, broker stops distance. Default `DRY_RUN=0` (live opens); set `1` only to simulate.
+- `TABLE=wick_strategy`, `MAGIC=260860` (breakout was gold_trades / 260831 — recover from git history if needed).
+- `active_filters()` always returns `[]` — Pine owns entry filters. Does not read `STRATEGY` from `.env`. Filter modules under `bot1_filters/` are kept but not loaded.
+- Guards before open: `MAX_AGE_SEC` (180), slip ≤ `min(MAX_SLIP_USD` 1.5, `MAX_SLIP_STOP_FRAC` 0.20 × `|entry−stop|)`, `MAX_OPEN` (default 6), broker stops distance. Default `DRY_RUN=0`.
 - Claim `copied_at` (null-only) before send to avoid double-open.
-- SL/TP from the row. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
-- After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price` (do not overwrite journal `entry`). On failure write `mt5_error` and clear claim.
-- Lock 40/35 locally: `none → pend → locked`. Formula from webhook `entry`+`tp`. On closed M5 40% hit → pend. At start of next M5, if lock SL is on the wrong side of price, skip before clamp. Clamp stays at least `min_stop_distance×1.2` from market and never crosses `mt5_fill_price`. Then `set_sl`. Log symbol `stops_level` on bot start. `LOCK_ENABLE` default on.
-- Track copied rows with `mt5_ticket` set, `mt5_closed_at` null, and `date_idt` within 7 days — not by `status`. Pine owns `status` / `exit` / `exit_reason` / `pips` / `usd_0_3`.
-- On MT5 close write only `mt5_close_price`, `mt5_closed_at` (UTC), `mt5_profit`, `mt5_exit_reason`. `deal.time` is broker server clock; convert with a whole-hour offset from `tick.time`, reusing the last good offset when the tick is stale. Refuse close without an OUT deal for that position (`history_deals_get(position=ticket)` only).
-- Each cycle log ORPHAN if an MT5 position (our magic) is outside that track (do not auto-close).
-- Cutover 2026-09-21: before that date, rows with `mt5_ticket` have journal `exit`/`exit_reason` overwritten by MT5 and the original Pine values cannot be recovered. After that date those journal fields are Pine; broker truth is `mt5_*`. Rows with null `mt5_ticket` were always Pine.
-- Gann/statics existence checks are cached in-process after a successful save (no repeat SELECT every poll).
-- After connect/ensure: auto-enable MT5 Algo Trading toolbar if it is off.
-- Do not generate signals. Do not size lots by risk. Do not trail/partial-close yet.
-- Trade timestamps stay UTC; Israel TZ only for hour filters + Gann `date_idt`.
-- After Israel 00:05, once per day write yesterday's aggregates to `gold_statics` (tp/sl/lock counts + profit/pips). Module `statics.py`.
-- Each trading day write Gann grids to `gann_levels`. Do not open trades from those rows.
-- After each successful `run_cycle`, write `heartbeat.txt` next to `bot.py` (UTC). `watchdog.ps1` restarts the bot if heartbeat is stale (~90s). Python from `.venv`, `WATCHDOG_PYTHON`, or gitignored `watchdog.local.ps1`. Entry script is a full path; Start-Bot redirects stdout/stderr to `bot_out.log`/`bot_err.log`.
+- SL/TP from the row at open. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
+- After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price`, `bot_lock_state=none`, `orig_stop` (do not overwrite journal `entry`). Do not rely on journal `stop` after open (webhook may overwrite with lock_sl).
+- Lock 40/30 on `bot_lock_*` only (ignore webhook `lock_state`): M1 bars from `entry_time+5m`; on 40% hit → `set_sl` at 30% same poll (`LOCK_SL_FRAC` default 0.30). If price already past lock SL → market close as lock (`mt5_exit_reason=lock`). Never write journal `stop` on lock. Clamp ≥ `min_stop_distance×1.2`, never through `mt5_fill_price`.
+- `PINE_EXIT_SYNC`: if journal `status=closed` and MT5 position still open >10s → market close.
+- Track copied rows with `mt5_ticket` set, `mt5_closed_at` null, and `date_idt` within 7 days — not by `status`.
+- On MT5 close write only `mt5_close_price`, `mt5_closed_at` (UTC), `mt5_profit`, `mt5_exit_reason`. Pine owns `status` / `exit` / `exit_reason` / `pips` / `usd_0_3`.
+- `deal.time` → UTC with whole-hour offset from `tick.time`, cached when tick stale. Refuse close without OUT deal for that position.
+- ORPHAN log for MAGIC positions outside track (do not auto-close).
+- After Israel 00:05, daily aggregates from `wick_strategy` → `gold_statics`. Gann → `gann_levels` (no opens from those rows).
+- Heartbeat + watchdog as before.
 
 ## When the strategy changes
 
@@ -42,3 +36,7 @@ If the user changes, improves, or asks to change entry/exit, scan timing, lot, s
 3. This rule — the "Current rules" bullets if execution rules changed
 
 Do not leave these files stale after a strategy edit.
+
+## When deploying / pushing to VPS
+
+Whenever code is committed for VPS deploy, or the user asks to upload/push/pull to the VPS, add a new dated entry at the **top** of [VPS_UPDATES.md](VPS_UPDATES.md) (below the intro) with: date, commit hash if known, detailed what changed, and any VPS run notes. Mark comparison-critical changes with `⭐ חשוב להשוואה`.

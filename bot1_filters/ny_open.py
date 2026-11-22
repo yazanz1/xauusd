@@ -10,7 +10,7 @@ from datetime import datetime, time
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from filters import FilterResult
+from bot1_filters import FilterResult
 
 TZ = ZoneInfo("Asia/Jerusalem")
 NAME = "ny_open"

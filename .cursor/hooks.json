@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": "python .cursor/hooks/vps_update_reminder.py before",
+        "matcher": "git\\s+push"
+      }
+    ],
+    "afterShellExecution": [
+      {
+        "command": "python .cursor/hooks/vps_update_reminder.py after",
+        "matcher": "git\\s+push"
+      }
+    ]
+  }
+}

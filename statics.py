@@ -1,6 +1,6 @@
-"""Daily gold trade statistics → public.gold_statics.
+"""Daily trade statistics → public.gold_statics.
 
-At end of each Israel trading day (after midnight), scans gold_trades for that
+At end of each Israel trading day (after midnight), scans wick_strategy for that
 date_idt and upserts counts: tp / sl / lock + profit + pips.
 """
 
@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from supabase import Client
 
-TRADES_TABLE = "gold_trades"
+TRADES_TABLE = "wick_strategy"
 STATICS_TABLE = "gold_statics"
 DATE_TZ = ZoneInfo("Asia/Jerusalem")
 # Finalize previous day once we are past this hour:minute (Israel).

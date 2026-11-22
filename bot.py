@@ -1,8 +1,8 @@
-"""Copy gold_trades signals from Supabase into MT5 (VPS / local).
+"""Copy wick_strategy (+60) signals from Supabase into MT5 (VPS / local).
 
 Flow each poll:
 1) open new signals (market + SL/TP)
-2) manage 40/35 lock on open tickets (none → pend → locked)
+2) manage 40/30 bot lock on open tickets (none → locked same poll, M1)
 3) sync open tickets (floating / close → Supabase)
 """
 
@@ -19,15 +19,15 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from supabase import Client, create_client
 
-from filters import active_filters, run_filters
+from bot1_filters import active_filters, run_filters
 from gann import sync_gann_levels
 from lock import manage_lock, resolve_exit_reason
 from mt5_client import MT5Client, MT5Error
 from sessions import SessionManager
 from statics import sync_daily_statics
 
-TABLE = "gold_trades"
-MAGIC = 260831
+TABLE = "wick_strategy"
+MAGIC = 260860
 DEAL_ENTRY_OUT = 1
 DEAL_ENTRY_INOUT = 2
 TRACK_DAYS = 7
@@ -114,6 +114,30 @@ def fetch_new_signals(db: Client) -> list[dict[str, Any]]:
     return result.data or []
 
 
+def same_bar_open(db: Client, trade: dict[str, Any]) -> bool:
+    """True if another row already opened MT5 for the same entry_time + direction."""
+    entry_time = trade.get("entry_time")
+    direction = (trade.get("direction") or "").strip().lower()
+    trade_id = trade.get("id")
+    if not entry_time or direction not in ("long", "short") or not trade_id:
+        return False
+    try:
+        result = (
+            db.table(TABLE)
+            .select("id")
+            .eq("entry_time", entry_time)
+            .eq("direction", direction)
+            .not_.is_("mt5_ticket", "null")
+            .neq("id", trade_id)
+            .limit(1)
+            .execute()
+        )
+        return bool(result.data)
+    except Exception as exc:
+        log.warning("same_bar_open failed: %s — treat as False", exc)
+        return False
+
+
 def fetch_open_copied(db: Client) -> list[dict[str, Any]]:
     """Rows the bot still owns: a ticket, no MT5 close yet, inside the last 7 Israel days.
 
@@ -178,7 +202,26 @@ def signal_age_ok(trade: dict[str, Any], max_age_sec: float) -> bool:
     return age <= max_age_sec
 
 
-def slip_ok(mt5: MT5Client, symbol: str, side: str, signal_entry: float | None, max_slip: float) -> tuple[bool, float, float]:
+def slip_cap(signal_entry: float | None, stop: float | None, max_slip_usd: float, stop_frac: float) -> float:
+    """Allowed slip: min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC × |entry − stop|).
+
+    If entry/stop missing, fall back to the fixed USD cap only.
+    """
+    cap = max_slip_usd
+    if signal_entry is not None and stop is not None and stop_frac > 0:
+        relative = stop_frac * abs(signal_entry - stop)
+        if relative > 0:
+            cap = min(cap, relative)
+    return cap
+
+
+def slip_ok(
+    mt5: MT5Client,
+    symbol: str,
+    side: str,
+    signal_entry: float | None,
+    max_slip: float,
+) -> tuple[bool, float, float]:
     tick = mt5.tick(symbol)
     live = float(tick.ask if side == "buy" else tick.bid)
     if signal_entry is None or max_slip <= 0:
@@ -200,8 +243,9 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
     lots = env_float("LOT_SIZE", 0.01)
     max_age = env_float("MAX_AGE_SEC", 180)
-    max_slip = env_float("MAX_SLIP_USD", 1.5)
-    max_open = env_int("MAX_OPEN", 2)
+    max_slip_usd = env_float("MAX_SLIP_USD", 1.5)
+    slip_stop_frac = env_float("MAX_SLIP_STOP_FRAC", 0.20)
+    max_open = env_int("MAX_OPEN", 6)
     dry_run = env_bool("DRY_RUN", False)
 
     direction = (trade.get("direction") or "").lower()
@@ -219,7 +263,11 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         log.error("Skip %s: missing stop/tp", trade_id)
         return
 
-    filt = run_filters(trade, active_filters())
+    ctx = {
+        "now": parse_ts(trade.get("created_at")) or utcnow(),
+        "same_bar_open": same_bar_open(db, trade),
+    }
+    filt = run_filters(trade, active_filters(), context=ctx)
     if not filt.allowed:
         update_trade(db, trade_id, {"mt5_error": filt.reason})
         log.warning("Skip %s: %s", trade_id, filt.reason)
@@ -237,12 +285,19 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         return
 
     side = "buy" if direction == "long" else "sell"
+    max_slip = slip_cap(signal_entry, stop, max_slip_usd, slip_stop_frac)
     ok_slip, live, slip = slip_ok(mt5, symbol, side, signal_entry, max_slip)
     if not ok_slip:
         update_trade(
             db,
             trade_id,
-            {"mt5_error": f"slip {slip:.2f} > max {max_slip} (live={live}, signal={signal_entry})"},
+            {
+                "mt5_error": (
+                    f"slip {slip:.2f} > max {max_slip:.2f} "
+                    f"(cap=min({max_slip_usd:.2f}, {slip_stop_frac:.0%}×|entry-stop|); "
+                    f"live={live}, signal={signal_entry})"
+                )
+            },
         )
         log.warning("Skip %s: slip %.2f > %.2f", trade_id, slip, max_slip)
         return
@@ -284,7 +339,7 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         lots,
         sl=stop,
         tp=tp,
-        comment=f"gold:{trade_id[:8]}",
+        comment=f"wick:{trade_id[:8]}",
         magic=MAGIC,
     )
     if not result.ok:
@@ -307,19 +362,25 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         "mt5_fill_price": fill_price,
         "stop": result.sl if result.sl is not None else stop,
         "tp": result.tp if result.tp is not None else tp,
-        "lock_state": "none",
-        "lock_sl": None,
-        "lock_pend_bar_time": None,
+        "bot_lock_state": "none",
+        "bot_lock_sl": None,
+        "bot_lock_pend_bar_time": None,
         "orig_stop": stop,
     }
     try:
         update_trade(db, trade_id, payload)
     except Exception:
         # Columns may be missing until SQL migrations run.
-        for key in ("mt5_fill_price", "lock_state", "lock_sl", "lock_pend_bar_time", "orig_stop"):
+        for key in (
+            "mt5_fill_price",
+            "bot_lock_state",
+            "bot_lock_sl",
+            "bot_lock_pend_bar_time",
+            "orig_stop",
+        ):
             payload.pop(key, None)
         update_trade(db, trade_id, payload)
-        log.warning("optional columns missing — apply sql/mt5_bridge_columns.sql and sql/lock_columns.sql")
+        log.warning("optional columns missing — apply sql/wick_bot_lock_columns.sql")
 
     log.info(
         "Opened %s %s ticket=%s volume=%s fill=%s sl=%s tp=%s",
@@ -357,27 +418,87 @@ def check_orphans(db: Client, mt5: MT5Client) -> None:
             )
 
 
+def _pine_closed_ago_sec(trade: dict[str, Any]) -> float | None:
+    """Seconds since Pine journal marked closed; None if still open / unknown."""
+    if (trade.get("status") or "").strip().lower() != "closed":
+        return None
+    when = parse_ts(trade.get("exit_time")) or parse_ts(trade.get("updated_at"))
+    if when is None:
+        return None
+    return max(0.0, (utcnow() - when).total_seconds())
+
+
 def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     ticket = int(trade["mt5_ticket"])
     pos = mt5.get_position(ticket)
+    dry_run = env_bool("DRY_RUN", False)
 
     if pos is not None:
-        floating = round(float(pos.profit + pos.swap), 2)
-        prev_profit = to_float(trade.get("mt5_profit"))
-        profit_changed = prev_profit is None or abs(prev_profit - floating) >= 0.01
+        # Pine already closed the journal but MT5 position still lives → sync close.
+        pine_ago = _pine_closed_ago_sec(trade)
+        if pine_ago is not None and pine_ago > 10:
+            log.warning(
+                "PINE_EXIT_SYNC ticket=%s status=closed for %.0fs but MT5 still open — market close",
+                ticket,
+                pine_ago,
+            )
+            if dry_run:
+                log.info("DRY_RUN would PINE_EXIT_SYNC close ticket=%s", ticket)
+                floating = round(float(pos.profit + pos.swap), 2)
+                update_trade(db, trade["id"], {"mt5_profit": floating})
+                return
 
-        if not profit_changed:
-            log.debug(
-                "Open ticket=%s unchanged floating=%s lock=%s",
+            result = mt5.close_position(ticket)
+            if not result.ok:
+                log.error(
+                    "PINE_EXIT_SYNC close failed ticket=%s retcode=%s comment=%r error=%s",
+                    ticket,
+                    result.retcode,
+                    result.comment,
+                    result.error,
+                )
+                try:
+                    update_trade(
+                        db,
+                        trade["id"],
+                        {
+                            "mt5_error": (
+                                f"PINE_EXIT_SYNC close failed retcode={result.retcode} "
+                                f"{result.error or result.comment or ''}"
+                            )[:500]
+                        },
+                    )
+                except Exception:
+                    pass
+                return
+
+            pos = mt5.get_position(ticket)
+            if pos is not None:
+                log.error("PINE_EXIT_SYNC ticket=%s still open after close_position", ticket)
+                return
+            # Fall through to OUT-deal sync below.
+        else:
+            floating = round(float(pos.profit + pos.swap), 2)
+            prev_profit = to_float(trade.get("mt5_profit"))
+            profit_changed = prev_profit is None or abs(prev_profit - floating) >= 0.01
+
+            if not profit_changed:
+                log.debug(
+                    "Open ticket=%s unchanged floating=%s bot_lock=%s",
+                    ticket,
+                    floating,
+                    trade.get("bot_lock_state") or "none",
+                )
+                return
+
+            update_trade(db, trade["id"], {"mt5_profit": floating})
+            log.info(
+                "Open ticket=%s floating=%s bot_lock=%s",
                 ticket,
                 floating,
-                trade.get("lock_state") or "none",
+                trade.get("bot_lock_state") or "none",
             )
             return
-
-        update_trade(db, trade["id"], {"mt5_profit": floating})
-        log.info("Open ticket=%s floating=%s lock=%s", ticket, floating, trade.get("lock_state") or "none")
-        return
 
     # No open position — only mark closed if we have an OUT deal for THIS position.
     deals = history_deals_for(mt5, ticket, trade.get("copied_at"))
@@ -507,6 +628,7 @@ def main() -> None:
         )
     except Exception:
         log.exception("Could not read stops_level for %s", symbol)
+    log.info("wick table=%s magic=%s filters=[]", TABLE, MAGIC)
     log.info(
         "Bot started. poll=%ss dry_run=%s lot=%s symbol=%s",
         poll_sec,

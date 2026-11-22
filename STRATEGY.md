@@ -1,12 +1,13 @@
 # אסטרטגיית xaubot
 
-עודכן לאחרונה: 2026-09-21
+עודכן לאחרונה: 2026-11-22
 
 בוט העתקה: קורא איתותים מ-Supabase ופותח אותם בחשבון MT5 (מקומי או VPS).  
-הבוט **לא** מייצר איתותים. האיתות נוצר במקור חיצוני (טבלת `gold_trades`).  
+הבוט **לא** מייצר איתותים. האיתות נוצר במקור חיצוני (טבלת `wick_strategy` — אסטרטגיית ‎+60).  
+MAGIC = `260860` (נפרד מפריצה `260831`).  
 במקביל הוא מחשב כל יום מסחר רמות Gann (יומי / לונדון / NY) ושומר ב-`gann_levels` — בלי לפתוח מהן עסקאות.  
-נעילת 40/35 מנוהלת **מקומית בבוט** — לא דרך `action=modify` מסופבייס.
-פילטרים ב־`filters/` — כל פילטר בקובץ משלו; רצים לפני פתיחה ב־MT5.
+נעילת **40/30** מנוהלת **מקומית בבוט** בעמודות `bot_lock_*` — לא דרך `lock_state` של הוובהוק.  
+אין פילטרי כניסה בבוט — `active_filters()` תמיד `[]` (סינון ב־Pine). קבצי `bot1_filters/` נשארים בדיסק ולא נטענים; `STRATEGY` ב־`.env` לא משפיע.
 
 ## מקור האיתות
 
@@ -14,17 +15,18 @@
 |---|---|
 | פרויקט Supabase | `pcieshmxxwplaodkrqet` |
 | URL | `https://pcieshmxxwplaodkrqet.supabase.co` |
-| טבלה | `public.gold_trades` |
+| טבלה | `public.wick_strategy` |
+| MAGIC | `260860` |
 | חיבור | `SUPABASE_SERVICE_ROLE_KEY` (RLS דולק בלי מדיניות) |
 
 עמודות איתות: `direction` (`long`/`short`), `entry`, `stop`, `tp`, `status` (`open`/`closed`).  
 עמודות ביצוע: `mt5_ticket`, `copied_at`, `mt5_error`, `mt5_fill_price`.  
-עמודות נעילה: `lock_state` (`none`/`pend`/`locked`), `lock_sl`, `lock_pend_bar_time`, `orig_stop`.  
-עמודות תוצאה MT5: `mt5_close_price`, `mt5_closed_at`, `mt5_profit` (+ גם `exit` / `pips` / `usd_0_3` לתאימות).
+עמודות נעילה **של הבוט**: `bot_lock_state` (`none`/`pend`/`locked`), `bot_lock_sl`, `bot_lock_pend_bar_time`, `orig_stop`.  
+עמודות נעילה **של הוובהוק/Pine** (יומן בלבד): `lock_state`, `lock_sl`, `lock_pend_bar_time`, `stop` — הבוט לא קורא אותן ל־`set_sl`.  
+עמודות תוצאה MT5: `mt5_close_price`, `mt5_closed_at`, `mt5_profit`, `mt5_exit_reason` (יומן Pine נשאר ב־`exit` / `pips` / `usd_0_3`).
 
 צבעי איתות בטבלה (`yellow` / `london` / `ny`) מתאימים לאינדיקטורי Gann בפרויקט.  
-אחרי `15:30` שעון ישראל הבוט חוסם כניסות `london`; מותרות `yellow` ו־`ny`.
-
+במצב wick הבוט **לא** חוסם `london` אחרי 15:30 — זה ב־Pine.
 ## מתי סורקים
 
 כל `POLL_SEC` שניות (ברירת מחדל **5**). סריקה ראשונה מיד בהפעלה.
@@ -34,15 +36,12 @@
 איתות חדש = `status = open` **ו-** `mt5_ticket IS NULL`.
 
 לפני פתיחה:
-1. פילטר שעות ישראל (`filters/israel_hours.py`): אין כניסות ב־`12:00–14:30` ו־`22:00–00:00` (Asia/Jerusalem, חצי־פתוח)
-2. פילטר לונדון אחרי NY (`filters/london_after_ny.py`): מ־`15:30` שעון ישראל אין כניסות `color=london` (רק `yellow` / `ny`)
-3. פילטר יום אחרי חג US (`filters/us_holiday_next_day.py`): ביום המסחר שאחרי חג — כניסות רק עד `10:00` IDT
-4. פילטר פתיחת NY (`filters/ny_open.py`): אין כניסות ב־`15:20–15:30` IDT בכל יום
-5. גיל איתות ≤ `MAX_AGE_SEC` (ברירת מחדל 180)
-6. סליפג' `|live - entry|` ≤ `MAX_SLIP_USD` (ברירת מחדל 1.50)
-7. מספר פוזיציות פתוחות של הבוט < `MAX_OPEN` (ברירת מחדל 2)
-8. מרחק SL/TP ≥ `trade_stops_level` של הברוקר
-9. אם `DRY_RUN=1` — רק כתיבת מה היה נפתח ל-`mt5_error`, בלי פקודה ל-MT5
+1. `active_filters()` — תמיד **רשימה ריקה**; סינון כניסה ב־Pine בלבד
+2. גיל איתות ≤ `MAX_AGE_SEC` (ברירת מחדל 180)
+3. סליפג' `|live - entry|` ≤ `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC × |entry − stop|)` (ברירות מחדל 1.50 ו־0.20)
+4. מספר פוזיציות פתוחות של הבוט (MAGIC נוכחי) < `MAX_OPEN` (ברירת מחדל **6**)
+5. מרחק SL/TP ≥ `trade_stops_level` של הברוקר
+6. אם `DRY_RUN=1` — רק כתיבת מה היה נפתח ל-`mt5_error`, בלי פקודה ל-MT5
 
 פתיחה חיה (`DRY_RUN=0`):
 1. claim על `copied_at` (רק אם עוד null) — מונע כפילות
@@ -52,48 +51,32 @@
 5. אחרי מילוי: `mt5_ticket`, `copied_at`, `mt5_fill_price` (לא דורסים את `entry` של היומן)
 6. כשל: `mt5_error`, איפוס `copied_at` לניסיון חוזר
 
-## פילטרים (`filters/`)
+## פילטרים (`bot1_filters/`)
 
-כל פילטר = קובץ נפרד. השרשרת מ־`active_filters()` רצה לפני פתיחה; דחייה נכתבת ל־`mt5_error` בלי claim.
+`active_filters()` מחזיר תמיד `[]` — אין חסימת כניסה בבוט (סינון ב־Pine).  
+מודולי הפילטרים נשארים בתיקייה לשימוש עתידי / היסטוריה, ולא נטענים.
 
-| פילטר | כלל |
-|---|---|
-| `israel_hours` | אין כניסות חדשות ב־`[12:00,14:30)` ו־`[22:00,24:00)` שעון ישראל |
-| `london_after_ny` | מ־`15:30` שעון ישראל חוסמים `london`; מותרים `yellow` ו־`ny` |
-| `us_holiday_next_day` | ביום המסחר שאחרי חג US (observed): כניסות רק עד `10:00` IDT; מ־`10:00` אין כניסה חדשה |
-| `ny_open` | בכל יום אין כניסות ב־`[15:20,15:30)` IDT (פתיחת NY / נזילות שקרית) |
+תיעוד/מעקב עסקאות נשאר ב־UTC; Gann לפי `Asia/Jerusalem`.
 
-חגי US בפילטר: New Year, MLK, Presidents' Day, Good Friday, Memorial Day, Juneteenth, Independence Day, Labor Day, Columbus/Indigenous Peoples' Day, Veterans Day, Thanksgiving, Christmas.  
-חג בסופ״ש → observed (שבת→שישי, ראשון→שני); הפילטר על יום המסחר הבא אחרי ה־observed. פתוחות ממשיכות.
+## נעילה 40/30 (מקומית בבוט, `bot_lock_*`)
 
-תיעוד/מעקב עסקאות נשאר ב־UTC; רק חלונות הפילטר וה־Gann לפי `Asia/Jerusalem`.
+הוובהוק עלול לכתוב `lock_state=locked` / לעדכן `stop` — **הבוט מתעלם** מזה ל־MT5. רק `bot_lock_*`.
 
-## נעילה 40/35 (מקומית בבוט)
+בסיס לנוסחה: `entry` + `tp` **מהוובהוק** (לא `mt5_fill_price`).
 
-**לא** מסתמכים על UPDATE של `stop` מסופבייס באמצע.
-
-בסיס לנוסחה: `entry` + `tp` **מהוובהוק** (לא `mt5_fill_price`) — דיוק מול היומן.
-
-1. `none` — על נר M5 **סגור**: אם נגע ב־40% מהמרחק entry→tp  
-   - לונג: `high >= entry + 0.4*(tp-entry)`  
-   - שורט: `low <= entry - 0.4*(entry-tp)`  
-   → `pend`, `lock_sl = entry ± 0.35*dist`, שמירת `lock_pend_bar_time`
-2. `pend` — ב־POLL הראשון אחרי ש**התחיל** נר M5 הבא, לפני `set_sl`:  
-   - אם `lock_sl` בצד הלא נכון של המחיר (לונג `>= bid`, שורט `<= ask`) — דילוג **לפני** הקלאמפ  
-   - קלאמפ מרחיק מהמחיר לפחות `min_stop_distance × 1.2`, ולא חוצה את `mt5_fill_price` (לונג לא מתחת, שורט לא מעל)  
-   - `normalize_price` ואז `set_sl` → `locked`  
-   - בלוג: ערך שנשלח + `retcode`
-3. `locked` — אין שינוי נוסף; TP נשאר קבוע
+1. `bot_lock_state=none` — בכל poll בודקים נרות **M1** מ־`entry_time + 5 דקות` (כמו Pine: הנר שאחרי הכניסה). אם high/low נגע ב־40% מ־entry→tp → באותו סבב מנסים `set_sl` ל־30% (`LOCK_SL_FRAC`, ברירת מחדל 0.30).
+2. לפני `set_sl`: אם המחיר כבר עבר את רמת ה־30% (לונג `bid ≤ lockSL`, שורט `ask ≥ lockSL`) — **סגירה בשוק** כ־lock (`bot_lock_state=locked`, `mt5_exit_reason=lock`). אין "דילוג ונשארים none" במקרה הזה.
+3. אם המחיר **עדיין** בצד הנכון של ה־30% אבל הברוקר דוחה רק בגלל `min_dist` — נשארים `none` ומנסים בסבב הבא. קלאמפ ≥ `min_stop_distance × 1.2` ולא חוצה `mt5_fill_price` כשאפשר להציב SL.
+4. הצלחת `set_sl` → `bot_lock_state=locked`, `bot_lock_sl=…`. **לא** כותבים `stop` בטבלה (הוובהוק עלול לדרוס `stop`; הבוט משתמש ב־`orig_stop` / `bot_lock_sl`).
+5. `locked` — אין שינוי נוסף; TP נשאר קבוע.
+6. גיבוי: אם Pine כבר `status=closed` והפוזיציה עדיין פתוחה ב־MT5 מעל 10 שניות → `PINE_EXIT_SYNC` סוגר בשוק.
 
 בעליית הבוט נרשם ללוג `stops_level` של הסימבול (points ו־$).
 
-סגירה (נגיעת hi/lo):
-- `exit_reason=tp` — נגיעה ביעד
-- `exit_reason=sl` — סטופ מקורי לפני שננעל
-- `exit_reason=lock` — סטופ אחרי נעילה; `pips` מחושב מ־`entry` (webhook) ליציאה
-- באותו נר יעד+סטופ → בפיין סטופ קודם; ב־MT5 מי שנוגע קודם בזמן
+סיווג סגירה ב־`mt5_exit_reason`: לפי מחיר מול `orig_stop` / `tp` / `bot_lock_sl`.  
+באותו נר יעד+סטופ → בפיין סטופ קודם; ב־MT5 מי שנוגע קודם בזמן.
 
-`LOCK_ENABLE=1` (ברירת מחדל). ב־`DRY_RUN` הנעילה מסומנת ב־DB בלי `set_sl` אמיתי.
+`LOCK_ENABLE=1` (ברירת מחדל). ב־`DRY_RUN` הנעילה מסומנת ב־`bot_lock_*` בלי `set_sl` אמיתי.
 
 ## סגירה (מ-MT5 חזרה ל-Supabase)
 
@@ -107,7 +90,7 @@
 - בלי פוזיציה ובלי OUT deal → לא נכתב `mt5_closed_at`
 - יתום: פוזיציית MAGIC בלי שורה במעקב → לוג `ORPHAN` בלבד
 
-הבוט **לא** סוגר יזום — הסגירה מגיעה מ-SL/TP ב-MT5 (או ידני בטרמינל).  
+סגירה רגילה מגיעה מ-SL/TP ב-MT5 (או ידני). חריגים יזומים של הבוט: (1) נעילה כשהמחיר כבר עבר את ה־30% → סגירה בשוק כ־lock; (2) `PINE_EXIT_SYNC` כשהיומן closed והפוזיציה עדיין פתוחה.  
 בהתחברות/סריקה: אם Algo Trading כבוי — הבוט מדליק אותו אוטומטית.
 
 ### נקודת חיתוך — 2026-09-21
@@ -137,7 +120,7 @@ Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.
 
 ## סטטיסטיקה יומית (`gold_statics`)
 
-מודול [`statics.py`](statics.py). אחרי **00:05** שעון ישראל מסכם את **אתמול** (`date_idt`) מ־`gold_trades` וכותב שורה אחת ל־`gold_statics`:
+מודול [`statics.py`](statics.py). אחרי **00:05** שעון ישראל מסכם את **אתמול** (`date_idt`) מ־`wick_strategy` וכותב שורה אחת ל־`gold_statics`:
 
 | שדה | משמעות |
 |---|---|
@@ -151,9 +134,9 @@ Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.
 
 ## מה האסטרטגיה עדיין לא עושה
 
-- אין trailing רציף (רק קפיצת נעילה חד־פעמית ל־35%)
+- אין trailing רציף (רק קפיצת נעילה חד־פעמית ל־30%)
 - אין חישוב לוט לפי סיכון
-- אין סינון לפי חדשות
+- סינון חדשות/שעות ב־Pine (במצב wick); לא בבוט
 - רץ על Windows עם טרמינל MT5 פתוח (מומלץ VPS)
 
 ## הפעלה
@@ -163,16 +146,31 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
-ב-Supabase להריץ פעם אחת אם חסר: `sql/mt5_bridge_columns.sql`, `sql/lock_columns.sql`, `sql/mt5_exit_reason.sql`.
+ב-Supabase ל־wick: `sql/wick_bot_lock_columns.sql` (עמודות `bot_lock_*`).
 
 ב-`.env`: Supabase + MT5. ברירת מחדל `DRY_RUN=0` (מסחר חי).
 
 ```powershell
+# 1) Smoke: DRY_RUN — expect log to find wick_strategy rows and mt5_error "DRY_RUN would …"
+#    Also confirm no leftover MAGIC 260831 breakout positions in MT5.
+$env:DRY_RUN=1
+python bot.py
+# 2) Live
+$env:DRY_RUN=0
 python bot.py
 ```
 
 ## היסטוריית שינויים
 
+יומן העלאות מפורט ל־VPS (תאריך + מה השתנה): [VPS_UPDATES.md](VPS_UPDATES.md).  
+⭐ חשוב להשוואה: cutover ל־wick 40/30 + `bot_lock_*` (2026-11-22); וגם 50/30→40/35 (2026-09-12).
+
+- **2026-11-22** — Cutover ל־`wick_strategy` (+60): `TABLE=wick_strategy`, `MAGIC=260860`, נעילה 40/30 מיידית על M1 מ־`entry_time+5m` בעמודות `bot_lock_*` (בלי לכתוב `stop`); אם המחיר כבר עבר את ה־30% → סגירה בשוק כ־lock; `PINE_EXIT_SYNC`; `MAX_OPEN=6`. `active_filters()` תמיד `[]` (לא תלוי ב־`STRATEGY`). סליפג׳: `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC×|entry−stop|)` (ברירות 1.5 / 0.20). לוג עלייה: `wick table=… magic=… filters=[]`.
+- **2026-11-22** — M1 rates: חלון שעון־שרת + `tzinfo=UTC` ל־`copy_rates_range` (לא naive); `bar.time` כ־UTC. לוג `scan_from_utc` / `first_bar_utc` / `last_bar_utc`. Clamp ל־fill רק אם fill לא עבר את raw_sl. `test_open_trade` MAGIC=260860.
+- **2026-11-15 20:10 IDT** — תיקייה `filters/` → `bot1_filters/`. נוספו E `ny_midday`, F `one_per_bar`, G `min_rr` + `_mode.py`; context ב־`bot.py` (`created_at`, `same_bar_open`). ברירות: E/F=`shadow`, G=`off`.
+- **2026-11-07 18:52 IDT** — `h1_ema_side` חובר ל־`active_filters()` (אחרון בשרשרת). ברירת מחדל `H1_EMA_MODE=shadow` (לוג בלבד); לחסימה אמיתית: `H1_EMA_MODE=block` ב־`.env`.
+- **2026-11-07 18:34 IDT** — נוסף `filters/h1_ema_side.py` (EMA50 של H1, כניסה רק נגד הצד של המחיר). בסיס בקטסט 14/09–06/11: 762 עסקאות ‎−$2,564.53 → 313 מאושרות ‎+$1,886.14; הקבוצה שנחסמת הפסידה ב־8/8 שבועות.
+- **2026-10-20** — `us_holiday_next_day`: לוח NYSE מלא בלי Columbus/Veterans; זיהוי לפי NY; `mt5_error` עם שם החג.
 - **2026-09-21** — הפרדת יומן/ביצוע: הבוט עוקב 7 ימים לפי `mt5_ticket` + `mt5_closed_at` (לא `status`); כותב `mt5_exit_reason` ולא נוגע ב־`exit`/`exit_reason`/`usd_0_3`. נעילה: דילוג לפני קלאמפ אם SL בצד הלא נכון; קלאמפ לא חוצה `mt5_fill_price`. `deal.time` → UTC לפי offset שעתי, עם cache כשהטיק ישן.
 - **2026-09-20** — Watchdog: `$EntryScript` נתיב מלא; redirect ל־`bot_out.log`/`bot_err.log` ב־Start-Bot; `watchdog.local.ps1` רק למשתנים.
 - **2026-09-19** — נעילה: `normalize_price` (point grid) לפני set_sl; דילוג אם SL בצד הלא נכון של השוק; לוג `sent_sl`+`retcode`; רצפת stops×1.2.

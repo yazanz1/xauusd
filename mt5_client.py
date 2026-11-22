@@ -373,7 +373,7 @@ class MT5Client:
             _save_server_offset(offset)
             return offset
         if self._server_utc_offset is not None:
-            log.info(
+            log.debug(
                 "Stale tick for %s — using cached server UTC offset %s hours",
                 symbol,
                 int(self._server_utc_offset.total_seconds() // 3600),
@@ -626,36 +626,62 @@ class MT5Client:
         timeframe: int,
         date_from: datetime,
         date_to: datetime,
+        *,
+        as_server_clock: bool = False,
     ) -> list:
+        """Fetch rates. Inputs are real UTC unless `as_server_clock=True`.
+
+        Always pass timezone-aware UTC datetimes into `copy_rates_range` so the
+        Python package does not reinterpret naive times as the VPS local zone.
+        When `as_server_clock` is False (default), shift the window by
+        `server_utc_offset` so the broker returns bars for the intended UTC range.
+        """
         api = _require_mt5()
         self.symbol_info(symbol)
-        start = date_from.astimezone(timezone.utc).replace(tzinfo=None) if date_from.tzinfo else date_from
-        end = date_to.astimezone(timezone.utc).replace(tzinfo=None) if date_to.tzinfo else date_to
+        start = date_from if date_from.tzinfo else date_from.replace(tzinfo=timezone.utc)
+        end = date_to if date_to.tzinfo else date_to.replace(tzinfo=timezone.utc)
+        start = start.astimezone(timezone.utc)
+        end = end.astimezone(timezone.utc)
+        if not as_server_clock:
+            off = self.server_utc_offset(symbol)
+            start = start + off
+            end = end + off
         rates = api.copy_rates_range(symbol, timeframe, start, end)
         return list(rates) if rates is not None else []
 
     def m1_open_at(self, symbol: str, when: datetime) -> tuple[float, datetime] | None:
-        """Open of the M1 bar at/after `when` (timezone-aware)."""
+        """Open of the M1 bar at/after `when` (UTC-aware).
+
+        MT5 bar times are broker-server clock; convert with server_utc_offset.
+        """
         api = _require_mt5()
-        start = when
-        end = when + timedelta(minutes=3)
-        bars = self.copy_rates(symbol, api.TIMEFRAME_M1, start, end)
-        if not bars:
+        off = self.server_utc_offset(symbol)
+        when_utc = when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+        # Server wall clock expressed as aware UTC (avoids naive→local VPS reinterpret).
+        start_srv = (when_utc.astimezone(timezone.utc) + off).astimezone(timezone.utc)
+        end_srv = (when_utc.astimezone(timezone.utc) + off + timedelta(minutes=3)).astimezone(
+            timezone.utc
+        )
+        rates = api.copy_rates_range(symbol, api.TIMEFRAME_M1, start_srv, end_srv)
+        if rates is None or len(rates) == 0:
             return None
-        bar = bars[0]
+        bar = rates[0]
         open_price = float(bar["open"])
-        bar_time = datetime.fromtimestamp(int(bar["time"]), tz=timezone.utc)
-        return open_price, bar_time
+        bar_as_utc = datetime.fromtimestamp(int(bar["time"]), tz=timezone.utc)
+        bar_utc = bar_as_utc - off
+        return open_price, bar_utc
 
     def daily_prev_close(self, symbol: str) -> tuple[float, datetime] | None:
-        """Close of the last completed daily bar."""
+        """Close of the last completed daily bar (timestamp in real UTC)."""
         api = _require_mt5()
         self.symbol_info(symbol)
         bars = api.copy_rates_from_pos(symbol, api.TIMEFRAME_D1, 0, 2)
         if bars is None or len(bars) < 2:
             return None
         prev = bars[0]
-        return float(prev["close"]), datetime.fromtimestamp(int(prev["time"]), tz=timezone.utc)
+        off = self.server_utc_offset(symbol)
+        bar_as_utc = datetime.fromtimestamp(int(prev["time"]), tz=timezone.utc)
+        return float(prev["close"]), bar_as_utc - off
 
     def m5_bars(self, symbol: str, count: int = 5) -> list:
         """Latest M5 bars; index 0 is oldest among the returned set, -1 is current forming."""
@@ -663,6 +689,42 @@ class MT5Client:
         self.symbol_info(symbol)
         bars = api.copy_rates_from_pos(symbol, api.TIMEFRAME_M5, 0, count)
         return list(bars) if bars is not None else []
+
+    def m1_bars_since(self, symbol: str, since: datetime, *, pad_minutes: int = 2) -> list[dict]:
+        """M1 OHLC from `since` UTC through now+pad, with `time` as UTC unix.
+
+        `copy_rates_range` expects broker-server wall times. We shift the request
+        window by `server_utc_offset` and convert each bar time back to UTC so
+        callers can compare against entry_time / copied_at in real UTC.
+        """
+        api = _require_mt5()
+        self.symbol_info(symbol)
+        off = self.server_utc_offset(symbol)
+        since_utc = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        since_utc = since_utc.astimezone(timezone.utc)
+        end_utc = datetime.now(timezone.utc) + timedelta(minutes=max(0, pad_minutes))
+        # Server wall clock tagged as UTC — MT5 docs want tz-aware UTC, not naive local.
+        start_srv = (since_utc + off).astimezone(timezone.utc)
+        end_srv = (end_utc + off).astimezone(timezone.utc)
+        rates = api.copy_rates_range(symbol, api.TIMEFRAME_M1, start_srv, end_srv)
+        if rates is None:
+            return []
+        out: list[dict] = []
+        for bar in rates:
+            bar_as_utc = datetime.fromtimestamp(int(bar["time"]), tz=timezone.utc)
+            bar_utc = bar_as_utc - off
+            if bar_utc < since_utc:
+                continue
+            out.append(
+                {
+                    "time": int(bar_utc.timestamp()),
+                    "open": float(bar["open"]),
+                    "high": float(bar["high"]),
+                    "low": float(bar["low"]),
+                    "close": float(bar["close"]),
+                }
+            )
+        return out
 
     def history_deals_by_position(self, position_ticket: int, *, lookback_days: int = 30) -> list:
         """Deals for one MT5 position only (entry + exit). Never filter by order id.
