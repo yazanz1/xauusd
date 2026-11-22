@@ -19,7 +19,7 @@ MAGIC = `260860` (נפרד מפריצה `260831`).
 | MAGIC | `260860` |
 | חיבור | `SUPABASE_SERVICE_ROLE_KEY` (RLS דולק בלי מדיניות) |
 
-עמודות איתות: `direction` (`long`/`short`), `entry`, `stop`, `tp`, `status` (`open`/`closed`).  
+עמודות איתות: `direction` (`long`/`short`), `entry`, `stop`, `tp`, `status` (`open`/`closed`), `lot_mult` (ברירת מחדל 1, בין 0 ל־1 לא כולל 0).  
 עמודות ביצוע: `mt5_ticket`, `copied_at`, `mt5_error`, `mt5_fill_price`.  
 עמודות נעילה **של הבוט**: `bot_lock_state` (`none`/`pend`/`locked`), `bot_lock_sl`, `bot_lock_pend_bar_time`, `orig_stop`.  
 עמודות נעילה **של הוובהוק/Pine** (יומן בלבד): `lock_state`, `lock_sl`, `lock_pend_bar_time`, `stop` — הבוט לא קורא אותן ל־`set_sl`.  
@@ -46,7 +46,7 @@ MAGIC = `260860` (נפרד מפריצה `260831`).
 פתיחה חיה (`DRY_RUN=0`):
 1. claim על `copied_at` (רק אם עוד null) — מונע כפילות
 2. `long` → BUY בשוק, `short` → SELL בשוק
-3. סימבול מ-`MT5_SYMBOL`, נפח מ-`LOT_SIZE`
+3. סימבול מ-`MT5_SYMBOL`, נפח = `normalize_volume(LOT_SIZE × lot_mult)`. חסר / לא תקין / 0 → 1. תקרה 1, רצפה 0.05. `LOT_SIZE` ב־`.env` לא משתנה.
 4. SL מ-`stop`, TP מ-`tp`
 5. אחרי מילוי: `mt5_ticket`, `copied_at`, `mt5_fill_price` (לא דורסים את `entry` של היומן)
 6. כשל: `mt5_error`, איפוס `copied_at` לניסיון חוזר
@@ -165,6 +165,7 @@ python bot.py
 יומן העלאות מפורט ל־VPS (תאריך + מה השתנה): [VPS_UPDATES.md](VPS_UPDATES.md).  
 ⭐ חשוב להשוואה: cutover ל־wick 40/30 + `bot_lock_*` (2026-11-22); וגם 50/30→40/35 (2026-09-12).
 
+- **2026-11-22** — `lot_mult`: הוובהוק שומר את השדה בכניסה (חסר → 1, אחרת תקרה 1 ורצפה 0.05). הבוט פותח `LOT_SIZE × lot_mult`. בלי השדה הלוט נשאר מלא. נעילה, סנכרון ו־`active_filters()` לא השתנו.
 - **2026-11-22** — Cutover ל־`wick_strategy` (+60): `TABLE=wick_strategy`, `MAGIC=260860`, נעילה 40/30 מיידית על M1 מ־`entry_time+5m` בעמודות `bot_lock_*` (בלי לכתוב `stop`); אם המחיר כבר עבר את ה־30% → סגירה בשוק כ־lock; `PINE_EXIT_SYNC`; `MAX_OPEN=6`. `active_filters()` תמיד `[]` (לא תלוי ב־`STRATEGY`). סליפג׳: `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC×|entry−stop|)` (ברירות 1.5 / 0.20). לוג עלייה: `wick table=… magic=… filters=[]`.
 - **2026-11-22** — M1 rates: חלון שעון־שרת + `tzinfo=UTC` ל־`copy_rates_range` (לא naive); `bar.time` כ־UTC. לוג `scan_from_utc` / `first_bar_utc` / `last_bar_utc`. Clamp ל־fill רק אם fill לא עבר את raw_sl. `test_open_trade` MAGIC=260860.
 - **2026-11-15 20:10 IDT** — תיקייה `filters/` → `bot1_filters/`. נוספו E `ny_midday`, F `one_per_bar`, G `min_rr` + `_mode.py`; context ב־`bot.py` (`created_at`, `same_bar_open`). ברירות: E/F=`shadow`, G=`off`.

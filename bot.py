@@ -22,6 +22,7 @@ from supabase import Client, create_client
 from bot1_filters import active_filters, run_filters
 from gann import sync_gann_levels
 from lock import manage_lock, resolve_exit_reason
+from lot_mult import lot_mult
 from mt5_client import MT5Client, MT5Error
 from sessions import SessionManager
 from statics import sync_daily_statics
@@ -241,7 +242,7 @@ def stops_distance_ok(mt5: MT5Client, symbol: str, side: str, price: float, sl: 
 
 def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
-    lots = env_float("LOT_SIZE", 0.01)
+    lot_size = env_float("LOT_SIZE", 0.01)
     max_age = env_float("MAX_AGE_SEC", 180)
     max_slip_usd = env_float("MAX_SLIP_USD", 1.5)
     slip_stop_frac = env_float("MAX_SLIP_STOP_FRAC", 0.20)
@@ -307,13 +308,23 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         log.warning("Skip %s: stops too close", trade_id)
         return
 
+    mult = lot_mult(trade.get("lot_mult"))
+    volume = mt5.normalize_volume(lot_size * mult, symbol)
+    log.info(
+        "Open %s lot=%s (LOT_SIZE=%s × lot_mult=%s)",
+        trade_id,
+        volume,
+        lot_size,
+        mult,
+    )
+
     if dry_run:
         update_trade(
             db,
             trade_id,
             {
                 "mt5_error": (
-                    f"DRY_RUN would {side} {symbol} lots={lots} live={live} "
+                    f"DRY_RUN would {side} {symbol} lots={volume} live={live} "
                     f"sl={stop} tp={tp} slip={slip:.2f}"
                 )
             },
@@ -336,7 +347,7 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     result = mt5.open_market(
         symbol,
         side,
-        lots,
+        volume,
         sl=stop,
         tp=tp,
         comment=f"wick:{trade_id[:8]}",

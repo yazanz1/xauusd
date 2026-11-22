@@ -1,6 +1,6 @@
 # Memory — xaubot
 
-עודכן לאחרונה: 2026-11-22 (wick_strategy +60 cutover)
+עודכן לאחרונה: 2026-11-22 (lot_mult)
 
 זה קובץ הזיכרון החי של האסטרטגיה. בכל שיפור — לעדכן כאן **ואת** `STRATEGY.md`.
 
@@ -11,6 +11,7 @@
 - סריקה כל `POLL_SEC` (ברירת מחדל 5 שניות), מיד בהפעלה; לוג עלייה: `wick table=wick_strategy magic=260860 filters=[]`
 - איתות חדש: `open` + אין `mt5_ticket`
 - כניסה בשוק: long=BUY, short=SELL עם SL/TP מהשורה
+- נפח: `LOT_SIZE × lot_mult` (חסר / לא תקין / 0 → 1; תקרה 1, רצפה 0.05). `LOT_SIZE` ב־`.env` לא משתנה
 - ברירת מחדל `DRY_RUN=0` — מסחר חי (לבדיקה: `DRY_RUN=1` ולוודא `mt5_error` עם "DRY_RUN would …")
 - הגנות: `MAX_AGE_SEC=180`, סליפג׳ `min(MAX_SLIP_USD=1.5, MAX_SLIP_STOP_FRAC=0.20 × |entry−stop|)`, `MAX_OPEN=6`, claim על `copied_at`
 - אחרי מילוי: `mt5_ticket` + `mt5_fill_price` + `bot_lock_state=none` + `orig_stop` (לא דורסים `entry`)

@@ -16,7 +16,7 @@ Current rules (2026-11-22):
 - `active_filters()` always returns `[]` — Pine owns entry filters. Does not read `STRATEGY` from `.env`. Filter modules under `bot1_filters/` are kept but not loaded.
 - Guards before open: `MAX_AGE_SEC` (180), slip ≤ `min(MAX_SLIP_USD` 1.5, `MAX_SLIP_STOP_FRAC` 0.20 × `|entry−stop|)`, `MAX_OPEN` (default 6), broker stops distance. Default `DRY_RUN=0`.
 - Claim `copied_at` (null-only) before send to avoid double-open.
-- SL/TP from the row at open. Fixed lot from `LOT_SIZE`. Symbol from `MT5_SYMBOL`.
+- SL/TP from the row at open. Volume is `LOT_SIZE × lot_mult` (missing / invalid / 0 → 1; clamp to [0.05, 1]). Symbol from `MT5_SYMBOL`. `LOT_SIZE` in `.env` stays unchanged.
 - After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price`, `bot_lock_state=none`, `orig_stop` (do not overwrite journal `entry`). Do not rely on journal `stop` after open (webhook may overwrite with lock_sl).
 - Lock 40/30 on `bot_lock_*` only (ignore webhook `lock_state`): M1 bars from `entry_time+5m`; on 40% hit → `set_sl` at 30% same poll (`LOCK_SL_FRAC` default 0.30). If price already past lock SL → market close as lock (`mt5_exit_reason=lock`). Never write journal `stop` on lock. Clamp ≥ `min_stop_distance×1.2`, never through `mt5_fill_price`.
 - `PINE_EXIT_SYNC`: if journal `status=closed` and MT5 position still open >10s → market close.
