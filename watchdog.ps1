@@ -1,4 +1,4 @@
-# Watchdog for xaubot — restart bot (and MT5 if needed) when heartbeat is stale.
+﻿# Watchdog for xaubot — restart bot (and MT5 if needed) when heartbeat is stale.
 # Run: powershell -ExecutionPolicy Bypass -File .\watchdog.ps1
 # Schedule: Task Scheduler AtLogOn only (MT5 needs an interactive session).
 #
