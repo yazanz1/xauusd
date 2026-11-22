@@ -19,7 +19,7 @@
 
 ## 2026-11-22 — watchdog.ps1 ב־UTF-8 עם BOM
 
-- Commit: ימולא אחרי הקומיט
+- Commit: `bcd8ee9`
 - PowerShell 5.1 בלי BOM קורא את המקף הארוך בסקריפט לפי קידוד המערכת, והפרסור נשבר (`string is missing the terminator` על `Watchdog error`).
 - הקובץ נשמר עם BOM (`EF BB BF`). אין שינוי לוגיקה.
 - **VPS:** `git pull`. אם ה-watchdog כבר רץ, אין חובה להפעיל מחדש בשביל הבוט; בהפעלה הבאה של `watchdog.ps1` השגיאה לא אמורה לחזור.
