@@ -25,6 +25,8 @@ Side = Literal["buy", "sell"]
 
 log = logging.getLogger("xaubot.mt5")
 _OFFSET_FILE = Path(__file__).resolve().parent / "server_utc_offset.txt"
+# Tickets currently being closed (lock + PINE_EXIT_SYNC same poll).
+_closing_in_progress: set[int] = set()
 
 
 def resolve_server_utc_offset(
@@ -603,6 +605,45 @@ class MT5Client:
         }
         return self._send_deal(request, info, ticket=ticket)
 
+    def safe_close_position(self, ticket: int, volume: float | None = None) -> TradeResult:
+        """Close if the position still exists; treat missing/10036 as already closed (ok).
+
+        Uses a per-ticket in-memory guard so lock + PINE_EXIT_SYNC in the same poll
+        do not both send a close.
+        """
+        ticket_i = int(ticket)
+        if ticket_i in _closing_in_progress:
+            return TradeResult(
+                ok=True,
+                ticket=ticket_i,
+                comment="closing_in_progress",
+                error="already_closed",
+            )
+        if self.get_position(ticket_i) is None:
+            return TradeResult(
+                ok=True,
+                ticket=ticket_i,
+                comment="already_closed",
+                error="already_closed",
+            )
+        _closing_in_progress.add(ticket_i)
+        try:
+            result = self.close_position(ticket_i, volume)
+            if result.ok:
+                return result
+            err = f"{result.error or ''} {result.comment or ''}".lower()
+            if result.retcode == 10036 or "not found" in err or "doesn't exist" in err:
+                return TradeResult(
+                    ok=True,
+                    ticket=ticket_i,
+                    retcode=result.retcode,
+                    comment=result.comment or "already_closed",
+                    error="already_closed",
+                )
+            return result
+        finally:
+            _closing_in_progress.discard(ticket_i)
+
     def get_position(self, ticket: int):
         api = _require_mt5()
         positions = api.positions_get(ticket=ticket)
@@ -707,23 +748,49 @@ class MT5Client:
         start_srv = (since_utc + off).astimezone(timezone.utc)
         end_srv = (end_utc + off).astimezone(timezone.utc)
         rates = api.copy_rates_range(symbol, api.TIMEFRAME_M1, start_srv, end_srv)
-        if rates is None:
-            return []
         out: list[dict] = []
-        for bar in rates:
+        seen_times: set[int] = set()
+
+        def _append(bar: Any) -> None:
             bar_as_utc = datetime.fromtimestamp(int(bar["time"]), tz=timezone.utc)
             bar_utc = bar_as_utc - off
             if bar_utc < since_utc:
-                continue
+                return
+            ts = int(bar_utc.timestamp())
+            if ts in seen_times:
+                # Prefer later copy (forming bar from from_pos may be fresher OHLC).
+                for i, existing in enumerate(out):
+                    if existing["time"] == ts:
+                        out[i] = {
+                            "time": ts,
+                            "open": float(bar["open"]),
+                            "high": float(bar["high"]),
+                            "low": float(bar["low"]),
+                            "close": float(bar["close"]),
+                        }
+                        return
+                return
+            seen_times.add(ts)
             out.append(
                 {
-                    "time": int(bar_utc.timestamp()),
+                    "time": ts,
                     "open": float(bar["open"]),
                     "high": float(bar["high"]),
                     "low": float(bar["low"]),
                     "close": float(bar["close"]),
                 }
             )
+
+        if rates is not None:
+            for bar in rates:
+                _append(bar)
+
+        # Explicitly include the forming (unclosed) M1 bar — range can omit it.
+        forming = api.copy_rates_from_pos(symbol, api.TIMEFRAME_M1, 0, 1)
+        if forming is not None and len(forming) > 0:
+            _append(forming[0])
+
+        out.sort(key=lambda b: b["time"])
         return out
 
     def history_deals_by_position(self, position_ticket: int, *, lookback_days: int = 30) -> list:

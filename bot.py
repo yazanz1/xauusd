@@ -24,6 +24,7 @@ from gann import sync_gann_levels
 from lock import manage_lock, resolve_exit_reason
 from lot_mult import lot_mult
 from mt5_client import MT5Client, MT5Error
+from preopen import preopen_check
 from sessions import SessionManager
 from statics import sync_daily_statics
 
@@ -104,15 +105,38 @@ def connect_supabase() -> Client:
 
 
 def fetch_new_signals(db: Client) -> list[dict[str, Any]]:
+    """Open journal rows not yet claimed/skipped (copied_at still null)."""
     result = (
         db.table(TABLE)
         .select("*")
         .eq("status", "open")
         .is_("mt5_ticket", "null")
+        .is_("copied_at", "null")
         .order("created_at")
         .execute()
     )
     return result.data or []
+
+
+def fetch_trade_by_id(db: Client, trade_id: str) -> dict[str, Any] | None:
+    result = db.table(TABLE).select("*").eq("id", trade_id).limit(1).execute()
+    rows = result.data or []
+    return rows[0] if rows else None
+
+
+def finalize_skip_signal(db: Client, trade: dict[str, Any], reason: str) -> None:
+    """Mark signal handled without opening: copied_at set, ticket stays null.
+
+    Does not overwrite an existing mt5_error that already explains another skip.
+    """
+    trade_id = trade["id"]
+    now = iso(utcnow())
+    payload: dict[str, Any] = {"copied_at": now, "updated_at": now}
+    existing = (trade.get("mt5_error") or "").strip()
+    if not existing:
+        payload["mt5_error"] = reason[:500]
+    db.table(TABLE).update(payload).eq("id", trade_id).is_("mt5_ticket", "null").execute()
+    log.warning("Skip %s (final): %s", trade_id, reason)
 
 
 def same_bar_open(db: Client, trade: dict[str, Any]) -> bool:
@@ -164,7 +188,11 @@ def update_trade(db: Client, trade_id: str, payload: dict[str, Any]) -> None:
 
 
 def claim_signal(db: Client, trade_id: str) -> bool:
-    """Mark copied_at only if still null — prevents double-open by two workers."""
+    """Optimistic lock: set copied_at only if still null (blocks double-open).
+
+    On open failure the caller MUST clear copied_at again so the row stays
+    eligible for fetch_new_signals retry.
+    """
     now = iso(utcnow())
     result = (
         db.table(TABLE)
@@ -256,12 +284,10 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     trade_id = trade["id"]
 
     if direction not in ("long", "short"):
-        update_trade(db, trade_id, {"mt5_error": f"invalid direction: {direction}"})
-        log.error("Skip %s: invalid direction %s", trade_id, direction)
+        finalize_skip_signal(db, trade, f"invalid direction: {direction}")
         return
     if stop is None or tp is None:
-        update_trade(db, trade_id, {"mt5_error": "missing stop or tp"})
-        log.error("Skip %s: missing stop/tp", trade_id)
+        finalize_skip_signal(db, trade, "missing stop or tp")
         return
 
     ctx = {
@@ -270,19 +296,18 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     }
     filt = run_filters(trade, active_filters(), context=ctx)
     if not filt.allowed:
-        update_trade(db, trade_id, {"mt5_error": filt.reason})
-        log.warning("Skip %s: %s", trade_id, filt.reason)
+        finalize_skip_signal(db, trade, filt.reason or "filter blocked")
         return
 
     if not signal_age_ok(trade, max_age):
-        update_trade(db, trade_id, {"mt5_error": f"signal too old (> {max_age}s)"})
-        log.warning("Skip %s: signal too old", trade_id)
+        finalize_skip_signal(db, trade, f"signal too old (> {max_age}s)")
         return
 
+    # Temporary deferrals: write mt5_error only — leave copied_at null so retry works.
     open_now = len(mt5.positions(symbol=symbol, magic=MAGIC))
     if open_now >= max_open:
         update_trade(db, trade_id, {"mt5_error": f"max open positions reached ({max_open})"})
-        log.warning("Skip %s: max open %s", trade_id, max_open)
+        log.warning("Defer %s: max open %s (copied_at stays null)", trade_id, max_open)
         return
 
     side = "buy" if direction == "long" else "sell"
@@ -300,13 +325,92 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                 )
             },
         )
-        log.warning("Skip %s: slip %.2f > %.2f", trade_id, slip, max_slip)
+        log.warning("Defer %s: slip %.2f > %.2f (copied_at stays null)", trade_id, slip, max_slip)
         return
 
     if not stops_distance_ok(mt5, symbol, side, live, stop, tp):
         update_trade(db, trade_id, {"mt5_error": "SL/TP too close for broker stops level"})
-        log.warning("Skip %s: stops too close", trade_id)
+        log.warning("Defer %s: stops too close (copied_at stays null)", trade_id)
         return
+
+    open_locked = False
+    open_sl = stop
+    preopen_enabled = env_bool("PREOPEN_CHECK", True)
+    preopen_mode = (os.getenv("PREOPEN_MODE") or "block").strip().lower()
+    if preopen_mode not in ("block", "shadow"):
+        preopen_mode = "block"
+
+    if preopen_enabled:
+        pre = preopen_check(
+            trade,
+            mt5,
+            symbol=symbol,
+            fetch_by_id=lambda tid, _db=db: fetch_trade_by_id(_db, tid),
+        )
+        if pre.trade is not None:
+            trade = pre.trade
+            stop = to_float(trade.get("orig_stop")) or to_float(trade.get("stop")) or stop
+            tp = to_float(trade.get("tp")) or tp
+            signal_entry = to_float(trade.get("entry")) or signal_entry
+            direction = (trade.get("direction") or direction).lower()
+            side = "buy" if direction == "long" else "sell"
+            open_sl = stop
+
+        if pre.result.startswith("SKIP_"):
+            if preopen_mode == "shadow":
+                log.info(
+                    "PreOpen shadow would %s for %s — opening anyway",
+                    pre.result,
+                    trade_id,
+                )
+            else:
+                finalize_skip_signal(db, trade, pre.reason or pre.result)
+                return
+        elif pre.result == "OPEN_LOCKED" and preopen_mode == "block":
+            lock_sl = pre.lock_sl
+            if lock_sl is None:
+                log.info("PreOpen OPEN_LOCKED %s without lock_sl — open with journal stop", trade_id)
+            else:
+                lock_sl = float(mt5.normalize_price(lock_sl, symbol))
+                # Re-check live vs lock30: may have crossed since preopen M1 scan.
+                tick_now = mt5.tick(symbol)
+                bid_now, ask_now = float(tick_now.bid), float(tick_now.ask)
+                if direction == "long" and bid_now <= lock_sl:
+                    finalize_skip_signal(db, trade, "skip: lock already passed")
+                    return
+                if direction == "short" and ask_now >= lock_sl:
+                    finalize_skip_signal(db, trade, "skip: lock already passed")
+                    return
+                # Distance for placing SL uses fill side (ask for buy / bid for sell).
+                price_now = ask_now if direction == "long" else bid_now
+                min_dist = float(mt5.min_stop_distance(symbol))
+                gap = (price_now - lock_sl) if direction == "long" else (lock_sl - price_now)
+                if min_dist > 0 and gap < min_dist:
+                    # Broker would reject lock30 SL — open with orig stop; manage_lock next poll.
+                    open_locked = False
+                    open_sl = stop
+                    log.info(
+                        "PreOpen OPEN_LOCKED %s lock30=%s gap=%.2f < min_dist=%.2f "
+                        "— open with orig stop; manage_lock next poll",
+                        trade_id,
+                        lock_sl,
+                        gap,
+                        min_dist,
+                    )
+                else:
+                    open_locked = True
+                    open_sl = lock_sl
+                    log.info(
+                        "PreOpen OPEN_LOCKED %s — open with SL=%s (lock 30%%)",
+                        trade_id,
+                        open_sl,
+                    )
+        elif pre.result == "OPEN_LOCKED" and preopen_mode == "shadow":
+            log.info(
+                "PreOpen shadow would OPEN_LOCKED for %s (lock_sl=%s) — opening with journal stop",
+                trade_id,
+                pre.lock_sl,
+            )
 
     mult = lot_mult(trade.get("lot_mult"))
     volume = mt5.normalize_volume(lot_size * mult, symbol)
@@ -325,18 +429,20 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
             {
                 "mt5_error": (
                     f"DRY_RUN would {side} {symbol} lots={volume} live={live} "
-                    f"sl={stop} tp={tp} slip={slip:.2f}"
+                    f"sl={open_sl} tp={tp} slip={slip:.2f}"
+                    + (" open_locked=1" if open_locked else "")
                 )
             },
         )
         log.info(
-            "DRY_RUN %s %s live=%s sl=%s tp=%s slip=%.2f",
+            "DRY_RUN %s %s live=%s sl=%s tp=%s slip=%.2f open_locked=%s",
             side,
             symbol,
             live,
-            stop,
+            open_sl,
             tp,
             slip,
+            open_locked,
         )
         return
 
@@ -348,15 +454,16 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         symbol,
         side,
         volume,
-        sl=stop,
+        sl=open_sl,
         tp=tp,
         comment=f"wick:{trade_id[:8]}",
         magic=MAGIC,
     )
     if not result.ok:
         err = (result.error or result.comment)[:500]
+        # Release claim so fetch_new_signals can retry (copied_at must stay null).
         update_trade(db, trade_id, {"mt5_error": err, "copied_at": None})
-        log.error("Open failed %s: %s", trade_id, err)
+        log.error("Open failed %s — released claim: %s", trade_id, err)
         return
 
     ticket = int(result.ticket or 0)
@@ -371,10 +478,10 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         "copied_at": iso(utcnow()),
         "mt5_error": None,
         "mt5_fill_price": fill_price,
-        "stop": result.sl if result.sl is not None else stop,
+        "stop": result.sl if result.sl is not None else open_sl,
         "tp": result.tp if result.tp is not None else tp,
-        "bot_lock_state": "none",
-        "bot_lock_sl": None,
+        "bot_lock_state": "locked" if open_locked else "none",
+        "bot_lock_sl": (result.sl if result.sl is not None else open_sl) if open_locked else None,
         "bot_lock_pend_bar_time": None,
         "orig_stop": stop,
     }
@@ -394,7 +501,7 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         log.warning("optional columns missing — apply sql/wick_bot_lock_columns.sql")
 
     log.info(
-        "Opened %s %s ticket=%s volume=%s fill=%s sl=%s tp=%s",
+        "Opened %s %s ticket=%s volume=%s fill=%s sl=%s tp=%s open_locked=%s",
         direction,
         symbol,
         ticket,
@@ -402,6 +509,7 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         fill_price,
         result.sl,
         result.tp,
+        open_locked,
     )
 
 
@@ -430,10 +538,23 @@ def check_orphans(db: Client, mt5: MT5Client) -> None:
 
 
 def _pine_closed_ago_sec(trade: dict[str, Any]) -> float | None:
-    """Seconds since Pine journal marked closed; None if still open / unknown."""
+    """Seconds since webhook wrote closed status (updated_at only)."""
     if (trade.get("status") or "").strip().lower() != "closed":
         return None
-    when = parse_ts(trade.get("exit_time")) or parse_ts(trade.get("updated_at"))
+    when = parse_ts(trade.get("updated_at"))
+    if when is None:
+        return None
+    return max(0.0, (utcnow() - when).total_seconds())
+
+
+def _opened_ago_sec(trade: dict[str, Any], pos: Any = None) -> float | None:
+    """Seconds since MT5 open (copied_at, else position time)."""
+    when = parse_ts(trade.get("copied_at"))
+    if when is None and pos is not None:
+        try:
+            when = datetime.fromtimestamp(int(pos.time), tz=timezone.utc)
+        except Exception:
+            when = None
     if when is None:
         return None
     return max(0.0, (utcnow() - when).total_seconds())
@@ -443,15 +564,34 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
     ticket = int(trade["mt5_ticket"])
     pos = mt5.get_position(ticket)
     dry_run = env_bool("DRY_RUN", False)
+    pine_exit_sec = env_float("PINE_EXIT_SYNC_SEC", 3.0)
+    symbol = os.getenv("MT5_SYMBOL", "XAUUSD")
 
     if pos is not None:
         # Pine already closed the journal but MT5 position still lives → sync close.
         pine_ago = _pine_closed_ago_sec(trade)
-        if pine_ago is not None and pine_ago > 10:
-            log.warning(
-                "PINE_EXIT_SYNC ticket=%s status=closed for %.0fs but MT5 still open — market close",
+        opened_ago = _opened_ago_sec(trade, pos)
+        if (
+            pine_ago is not None
+            and pine_ago > pine_exit_sec
+            and (opened_ago is None or opened_ago >= pine_exit_sec)
+        ):
+            try:
+                tick = mt5.tick(symbol)
+                bid, ask = float(tick.bid), float(tick.ask)
+            except Exception:
+                bid = ask = 0.0
+            log.info(
+                "PineExitSync ticket=%s pine_exit=%s pine_reason=%s wait=%.1f "
+                "bid=%s ask=%s broker_sl=%s broker_tp=%s",
                 ticket,
+                trade.get("exit"),
+                trade.get("exit_reason"),
                 pine_ago,
+                bid,
+                ask,
+                getattr(pos, "sl", None),
+                getattr(pos, "tp", None),
             )
             if dry_run:
                 log.info("DRY_RUN would PINE_EXIT_SYNC close ticket=%s", ticket)
@@ -459,7 +599,7 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                 update_trade(db, trade["id"], {"mt5_profit": floating})
                 return
 
-            result = mt5.close_position(ticket)
+            result = mt5.safe_close_position(ticket)
             if not result.ok:
                 log.error(
                     "PINE_EXIT_SYNC close failed ticket=%s retcode=%s comment=%r error=%s",
@@ -483,8 +623,9 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                     pass
                 return
 
+            # already_closed (missing / 10036) or successful send → history sync below.
             pos = mt5.get_position(ticket)
-            if pos is not None:
+            if pos is not None and (result.error or "") != "already_closed":
                 log.error("PINE_EXIT_SYNC ticket=%s still open after close_position", ticket)
                 return
             # Fall through to OUT-deal sync below.

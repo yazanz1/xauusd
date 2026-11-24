@@ -209,12 +209,13 @@ def _market_close_as_lock(
         lock_sl,
         reason,
     )
-    result = mt5.close_position(int(ticket))
+    result = mt5.safe_close_position(int(ticket))
     payload: dict[str, Any] = {
         "bot_lock_state": "locked",
         "bot_lock_sl": lock_sl,
         "mt5_exit_reason": "lock",
     }
+    already_closed = (result.error or "") == "already_closed"
     if not result.ok:
         log.error(
             "market close failed ticket=%s retcode=%s comment=%r error=%s",
@@ -233,8 +234,9 @@ def _market_close_as_lock(
             pass
         return {**trade, **payload}
 
+    # Missing position / 10036: do not write mt5_error; sync_trade fills close fields.
     payload["mt5_error"] = None
-    if result.price is not None:
+    if result.price is not None and not already_closed:
         payload["mt5_close_price"] = result.price
     try:
         update_trade(trade_id, payload)
@@ -243,9 +245,11 @@ def _market_close_as_lock(
         return trade
 
     log.info(
-        "Locked via market close ticket=%s exit=%s (strategy lock when SL already past)",
+        "Locked via market close ticket=%s exit=%s already_closed=%s "
+        "(strategy lock when SL already past)",
         ticket,
         result.price,
+        already_closed,
     )
     return {**trade, **payload}
 

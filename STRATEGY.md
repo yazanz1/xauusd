@@ -1,6 +1,6 @@
 # אסטרטגיית xaubot
 
-עודכן לאחרונה: 2026-11-22
+עודכן לאחרונה: 2026-11-23
 
 בוט העתקה: קורא איתותים מ-Supabase ופותח אותם בחשבון MT5 (מקומי או VPS).  
 הבוט **לא** מייצר איתותים. האיתות נוצר במקור חיצוני (טבלת `wick_strategy` — אסטרטגיית ‎+60).  
@@ -33,23 +33,24 @@ MAGIC = `260860` (נפרד מפריצה `260831`).
 
 ## כניסה (פתיחה ב-MT5)
 
-איתות חדש = `status = open` **ו-** `mt5_ticket IS NULL`.
+איתות חדש לסריקה = `status=open` ו־`mt5_ticket` null ו־`copied_at` null (דילוג סופי מסמן `copied_at`).
 
 לפני פתיחה:
 1. `active_filters()` — תמיד **רשימה ריקה**; סינון כניסה ב־Pine בלבד
-2. גיל איתות ≤ `MAX_AGE_SEC` (ברירת מחדל 180)
+2. גיל איתות ≤ `MAX_AGE_SEC` (ברירת מחדל 180) — תקרת בטיחות מ־`created_at`
 3. סליפג' `|live - entry|` ≤ `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC × |entry − stop|)` (ברירות מחדל 1.50 ו־0.20)
 4. מספר פוזיציות פתוחות של הבוט (MAGIC נוכחי) < `MAX_OPEN` (ברירת מחדל **6**)
 5. מרחק SL/TP ≥ `trade_stops_level` של הברוקר
-6. אם `DRY_RUN=1` — רק כתיבת מה היה נפתח ל-`mt5_error`, בלי פקודה ל-MT5
+6. `preopen_check` (`PREOPEN_CHECK=1`, מצב `PREOPEN_MODE=block|shadow`): רענון השורה + M1 מ־`entry_time+5m` (כולל נר הדקה הנוכחית). דילוג סופי אם Pine כבר closed / נגע SL / TP / עבר את נעילת 30% אחרי נגיעה ב־40%. אם נגע ב־40% והמחיר עדיין בצד הרווח → פתיחה עם SL=30% ו־`bot_lock_state=locked`; אם `lock30` קרוב למחיר מ־`min_stop_distance` → פתיחה עם הסטופ המקורי ו־`manage_lock` בסבב הבא. ב־`shadow` רק לוג. `copied_at` רק בדילוג סופי / פילטר / גיל / פתיחה מוצלחת — דחיית slip או `max_open` משאירה null ל־retry.
+7. אם `DRY_RUN=1` — רק כתיבת מה היה נפתח ל-`mt5_error`, בלי פקודה ל-MT5
 
 פתיחה חיה (`DRY_RUN=0`):
 1. claim על `copied_at` (רק אם עוד null) — מונע כפילות
-2. `long` → BUY בשוק, `short` → SELL בשוק
+2. `long` → BUY בשוק, `short` → SELL בשוק (לא לימיט)
 3. סימבול מ-`MT5_SYMBOL`, נפח = `normalize_volume(LOT_SIZE × lot_mult)`. חסר / לא תקין / 0 → 1. תקרה 1, רצפה 0.05. `LOT_SIZE` ב־`.env` לא משתנה.
-4. SL מ-`stop`, TP מ-`tp`
-5. אחרי מילוי: `mt5_ticket`, `copied_at`, `mt5_fill_price` (לא דורסים את `entry` של היומן)
-6. כשל: `mt5_error`, איפוס `copied_at` לניסיון חוזר
+4. SL מ-`stop` (או מנעילת 30% ב־`OPEN_LOCKED`), TP מ-`tp`
+5. אחרי מילוי: `mt5_ticket`, `copied_at`, `mt5_fill_price` (לא דורסים את `entry` של היומן); ב־`OPEN_LOCKED` גם `bot_lock_state=locked` / `bot_lock_sl`
+6. כשל פתיחה: `mt5_error`, איפוס `copied_at` לניסיון חוזר. דילוג preopen: `copied_at=now`, בלי טיקט, בלי retry
 
 ## פילטרים (`bot1_filters/`)
 
@@ -69,7 +70,7 @@ MAGIC = `260860` (נפרד מפריצה `260831`).
 3. אם המחיר **עדיין** בצד הנכון של ה־30% אבל הברוקר דוחה רק בגלל `min_dist` — נשארים `none` ומנסים בסבב הבא. קלאמפ ≥ `min_stop_distance × 1.2` ולא חוצה `mt5_fill_price` כשאפשר להציב SL.
 4. הצלחת `set_sl` → `bot_lock_state=locked`, `bot_lock_sl=…`. **לא** כותבים `stop` בטבלה (הוובהוק עלול לדרוס `stop`; הבוט משתמש ב־`orig_stop` / `bot_lock_sl`).
 5. `locked` — אין שינוי נוסף; TP נשאר קבוע.
-6. גיבוי: אם Pine כבר `status=closed` והפוזיציה עדיין פתוחה ב־MT5 מעל 10 שניות → `PINE_EXIT_SYNC` סוגר בשוק.
+6. גיבוי: אם Pine כבר `status=closed` והפוזיציה עדיין פתוחה ב־MT5 מעל `PINE_EXIT_SYNC_SEC` (ברירת מחדל **3**) מ־`updated_at` → `PINE_EXIT_SYNC` סוגר בשוק (לא סוגר אם העסקה נפתחה לפני פחות מאותן שניות). לפני סגירה: בדיקה שהפוזיציה קיימת; `10036` / חסר = סנכרון מההיסטוריה בלי `mt5_error`.
 
 בעליית הבוט נרשם ללוג `stops_level` של הסימבול (points ו־$).
 
@@ -165,6 +166,7 @@ python bot.py
 יומן העלאות מפורט ל־VPS (תאריך + מה השתנה): [VPS_UPDATES.md](VPS_UPDATES.md).  
 ⭐ חשוב להשוואה: cutover ל־wick 40/30 + `bot_lock_*` (2026-11-22); וגם 50/30→40/35 (2026-09-12).
 
+- **2026-11-23** — `preopen_check` לפני פתיחה (דילוג אם Pine כבר סיים / נעילה עברה; `OPEN_LOCKED` עם SL=30%, או סטופ מקורי אם `lock30` צפוף ל־stops). `copied_at` רק בהחלטה סופית / פתיחה מוצלחת; slip/`max_open` משאירים null. `m1_bars_since` כולל נר נוכחי. סגירה בטוחה (`safe_close_position`). `PINE_EXIT_SYNC_SEC` ברירת מחדל 3 מ־`updated_at`. שערי slip לא השתנו (VPS: `MAX_SLIP_STOP_FRAC=0.50`).
 - **2026-11-22** — `lot_mult`: הוובהוק שומר את השדה בכניסה (חסר → 1, אחרת תקרה 1 ורצפה 0.05). הבוט פותח `LOT_SIZE × lot_mult`. בלי השדה הלוט נשאר מלא. נעילה, סנכרון ו־`active_filters()` לא השתנו.
 - **2026-11-22** — Cutover ל־`wick_strategy` (+60): `TABLE=wick_strategy`, `MAGIC=260860`, נעילה 40/30 מיידית על M1 מ־`entry_time+5m` בעמודות `bot_lock_*` (בלי לכתוב `stop`); אם המחיר כבר עבר את ה־30% → סגירה בשוק כ־lock; `PINE_EXIT_SYNC`; `MAX_OPEN=6`. `active_filters()` תמיד `[]` (לא תלוי ב־`STRATEGY`). סליפג׳: `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC×|entry−stop|)` (ברירות 1.5 / 0.20). לוג עלייה: `wick table=… magic=… filters=[]`.
 - **2026-11-22** — M1 rates: חלון שעון־שרת + `tzinfo=UTC` ל־`copy_rates_range` (לא naive); `bar.time` כ־UTC. לוג `scan_from_utc` / `first_bar_utc` / `last_bar_utc`. Clamp ל־fill רק אם fill לא עבר את raw_sl. `test_open_trade` MAGIC=260860.

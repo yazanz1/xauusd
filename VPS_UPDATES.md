@@ -17,6 +17,17 @@
 
 ---
 
+## ⭐ חשוב להשוואה — 2026-11-23 — preopen + PINE_EXIT_SYNC מהיר + סגירה בטוחה
+
+- Commit: ימולא אחרי הקומיט
+- **למה:** ב-23.11 הבוט פתח עסקאות שה-Pine כבר סיים (פער Pine −215$ מול MT5 −1,014$). גם היו ניסיונות סגירה כפולים (`10036`).
+- `preopen.py` לפני פתיחה: רענון שורה + M1 מ־`entry_time+5m` (כולל נר נוכחי). דילוג סופי אם Pine closed / SL / TP / נעילה כבר עברה. `OPEN_LOCKED` עם SL=30%; אם `lock30` צפוף ל־`min_stop_distance` → סטופ מקורי ו־`manage_lock` בסבב הבא.
+- `copied_at` רק בהחלטה סופית / פתיחה מוצלחת. דחיית slip / `max_open` / stops צפופים משאירה `null` ל־retry. claim מתאפס אם הפתיחה נכשלה. `fetch_new_signals` דורש `copied_at` null.
+- `safe_close_position`: לא שולח אם הפוזיציה חסרה; `10036` = כבר סגור (בלי `mt5_error`); נעילה בזיכרון לפי טיקט.
+- `PINE_EXIT_SYNC_SEC` ברירת מחדל **3** מ־`updated_at` (היה 10 קבוע).
+- שערי slip **לא** השתנו בקוד (ברירת מחדל עדיין 0.20). ב־VPS נשאר `MAX_SLIP_STOP_FRAC=0.50` כמו שכבר מוגדר.
+- **VPS:** `git pull` + restart watchdog/bot. ביום הראשון: `PREOPEN_MODE=shadow` ב־`.env` (לוג בלי חסימה). אחרי בדיקת `PreOpen … SKIP_*` בלוג → `block`. אופציונלי: `PINE_EXIT_SYNC_SEC=3`.
+
 ## 2026-11-22 — watchdog.ps1 ב־UTF-8 עם BOM
 
 - Commit: `bcd8ee9`
