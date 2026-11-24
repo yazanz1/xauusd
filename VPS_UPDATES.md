@@ -19,7 +19,7 @@
 
 ## ⭐ חשוב להשוואה — 2026-11-23 — preopen + PINE_EXIT_SYNC מהיר + סגירה בטוחה
 
-- Commit: ימולא אחרי הקומיט
+- Commit: `f855981`
 - **למה:** ב-23.11 הבוט פתח עסקאות שה-Pine כבר סיים (פער Pine −215$ מול MT5 −1,014$). גם היו ניסיונות סגירה כפולים (`10036`).
 - `preopen.py` לפני פתיחה: רענון שורה + M1 מ־`entry_time+5m` (כולל נר נוכחי). דילוג סופי אם Pine closed / SL / TP / נעילה כבר עברה. `OPEN_LOCKED` עם SL=30%; אם `lock30` צפוף ל־`min_stop_distance` → סטופ מקורי ו־`manage_lock` בסבב הבא.
 - `copied_at` רק בהחלטה סופית / פתיחה מוצלחת. דחיית slip / `max_open` / stops צפופים משאירה `null` ל־retry. claim מתאפס אם הפתיחה נכשלה. `fetch_new_signals` דורש `copied_at` null.
