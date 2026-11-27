@@ -19,7 +19,7 @@
 
 ## 2026-11-27 — לוג עמיד + 10029 + timeouts + bot_events (סעיף 9)
 
-- Commit: _(למלא אחרי commit/push)_
+- Commit: `793d224`
 - `safe_close_position`: retcode **10029** → `frozen_retry` (בלי `mt5_error`; retry בסבב הבא). 10036 נשאר `already_closed`.
 - לוג ראשי: `logs/bot.log` (`TimedRotatingFileHandler`, חצות, 14 יום). `httpx`/`httpcore` → WARNING. שורת `===== Bot start … commit=… =====` + `Resume open trades: N`.
 - טבלה `public.bot_events` + `bot_events.py` (תור ברקע). watchdog כותב `restart` עם `age=` / `StaleSec`.
