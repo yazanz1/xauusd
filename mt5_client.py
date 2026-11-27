@@ -14,7 +14,9 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal, TypeVar
+
+_T = TypeVar("_T")
 
 try:
     import MetaTrader5 as mt5
@@ -78,6 +80,31 @@ MT_WMCMD_EXPERTS = 32851
 VK_CONTROL = 0x11
 VK_E = 0x45
 KEYEVENTF_KEYUP = 0x0002
+
+
+def _mt5_slow_warn_sec() -> float:
+    """Wall-clock threshold for slow MT5 call WARNING (same thread — no cancel)."""
+    raw = os.getenv("MT5_SLOW_WARN_SEC") or os.getenv("MT5_CALL_TIMEOUT_SEC", "15")
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        return 15.0
+
+
+def call_timed(name: str, fn: Callable[[], _T]) -> _T:
+    """Run an MT5 call on the current thread; WARNING if slower than MT5_SLOW_WARN_SEC.
+
+    MetaTrader5 is not thread-safe — never wrap native calls in worker threads.
+    There is no hard cancel; only duration logging. Real HTTP timeouts belong to Supabase.
+    """
+    t0 = time.monotonic()
+    try:
+        return fn()
+    finally:
+        elapsed = time.monotonic() - t0
+        limit = _mt5_slow_warn_sec()
+        if elapsed > limit:
+            log.warning("MT5 slow op=%s %.1fs (warn>%.0fs)", name, elapsed, limit)
 
 
 class MT5Error(RuntimeError):
@@ -498,7 +525,7 @@ class MT5Client:
             "tp": new_tp,
             "magic": pos.magic,
         }
-        result = api.order_send(request)
+        result = call_timed("order_send_sltp", lambda: api.order_send(request))
         out = self._from_result(result, ticket=ticket, sl=new_sl, tp=new_tp)
         if not out.ok:
             # Keep exact sent levels visible for Invalid stops debugging.
@@ -610,6 +637,9 @@ class MT5Client:
 
         Uses a per-ticket in-memory guard so lock + PINE_EXIT_SYNC in the same poll
         do not both send a close.
+
+        retcode 10029 (trade disabled / frozen near SL): not a hard failure —
+        returns error=\"frozen_retry\" so callers skip mt5_error and try next poll.
         """
         ticket_i = int(ticket)
         if ticket_i in _closing_in_progress:
@@ -639,6 +669,19 @@ class MT5Client:
                     retcode=result.retcode,
                     comment=result.comment or "already_closed",
                     error="already_closed",
+                )
+            # 10029 = trade disabled (broker freezes position near SL/TP).
+            if result.retcode == 10029 or "trade is disabled" in err or "frozen" in err:
+                log.warning(
+                    "SafeClose frozen ticket=%s retcode=10029 — retry next poll",
+                    ticket_i,
+                )
+                return TradeResult(
+                    ok=False,
+                    ticket=ticket_i,
+                    retcode=result.retcode or 10029,
+                    comment=result.comment or "frozen",
+                    error="frozen_retry",
                 )
             return result
         finally:
@@ -805,18 +848,19 @@ class MT5Client:
         end = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=1)
         start = end - timedelta(days=max(1, lookback_days))
 
-        # Prime history window (Python API has no separate history_select).
-        api.history_deals_get(start, end)
-
-        deals = api.history_deals_get(position=pid)
-        if deals:
+        def _fetch() -> list:
+            # Prime history window (Python API has no separate history_select).
+            api.history_deals_get(start, end)
+            deals = api.history_deals_get(position=pid)
+            if deals:
+                return [d for d in deals if int(d.position_id) == pid]
+            # Fallback: range query + strict position_id filter.
+            deals = api.history_deals_get(start, end)
+            if not deals:
+                return []
             return [d for d in deals if int(d.position_id) == pid]
 
-        # Fallback: range query + strict position_id filter.
-        deals = api.history_deals_get(start, end)
-        if not deals:
-            return []
-        return [d for d in deals if int(d.position_id) == pid]
+        return call_timed("history_deals_by_position", _fetch)
 
     def history_deals(
         self,
@@ -841,7 +885,11 @@ class MT5Client:
         result = None
         for mode in self.filling_modes(info):
             request["type_filling"] = mode
-            result = api.order_send(request)
+
+            def _send(req=dict(request)):
+                return api.order_send(req)
+
+            result = call_timed("order_send", _send)
             if result is None:
                 continue
             if result.retcode == api.TRADE_RETCODE_DONE:

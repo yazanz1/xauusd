@@ -16,6 +16,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
+import bot_events
 from mt5_client import MT5Client
 
 log = logging.getLogger("xaubot.lock")
@@ -216,6 +217,13 @@ def _market_close_as_lock(
         "mt5_exit_reason": "lock",
     }
     already_closed = (result.error or "") == "already_closed"
+    if (result.error or "") == "frozen_retry":
+        # Broker froze the position near SL — do not write mt5_error; retry next poll.
+        log.warning(
+            "Lock market close frozen ticket=%s — leave open for next poll",
+            ticket,
+        )
+        return trade
     if not result.ok:
         log.error(
             "market close failed ticket=%s retcode=%s comment=%r error=%s",
@@ -250,6 +258,14 @@ def _market_close_as_lock(
         ticket,
         result.price,
         already_closed,
+    )
+    bot_events.emit(
+        "INFO",
+        "lock",
+        f"market close ticket={ticket} already_closed={already_closed}",
+        trade_id=str(trade_id),
+        ticket=int(ticket),
+        data={"lock_sl": lock_sl, "exit": result.price, "reason": reason},
     )
     return {**trade, **payload}
 
@@ -438,6 +454,14 @@ def _try_set_lock_sl(
         ticket,
         payload["bot_lock_sl"],
         result.retcode,
+    )
+    bot_events.emit(
+        "INFO",
+        "lock",
+        f"set_sl ticket={ticket} sl={payload['bot_lock_sl']}",
+        trade_id=str(trade_id),
+        ticket=int(ticket),
+        data={"bot_lock_sl": payload["bot_lock_sl"], "retcode": result.retcode},
     )
     return {**trade, **payload}
 

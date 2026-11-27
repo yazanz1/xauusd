@@ -17,11 +17,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
+import bot_events
 from bot1_filters import active_filters, run_filters
 from gann import sync_gann_levels
 from lock import manage_lock, resolve_exit_reason
+from logging_setup import bot_start_banner, git_commit_short, setup_logging
 from lot_mult import lot_mult
 from mt5_client import MT5Client, MT5Error
 from preopen import preopen_check
@@ -101,25 +103,60 @@ def parse_ts(value: Any) -> datetime | None:
 
 
 def connect_supabase() -> Client:
-    return create_client(env("SUPABASE_URL"), env("SUPABASE_SERVICE_ROLE_KEY"))
+    timeout_sec = env_float("SUPABASE_TIMEOUT_SEC", 10.0)
+    return create_client(
+        env("SUPABASE_URL"),
+        env("SUPABASE_SERVICE_ROLE_KEY"),
+        options=ClientOptions(postgrest_client_timeout=timeout_sec),
+    )
+
+
+def _sb_call(name: str, fn):
+    """Run a Supabase call; on timeout/network error log WARNING and re-raise."""
+    try:
+        return fn()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "timeout" in err or "timed out" in err or type(exc).__name__ in (
+            "TimeoutException",
+            "ReadTimeout",
+            "ConnectTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
+        ):
+            log.warning("Supabase timeout op=%s: %s", name, exc)
+            bot_events.emit(
+                "WARNING",
+                "timeout",
+                f"supabase timeout op={name}",
+                data={"op": name, "error": str(exc)[:300]},
+            )
+        raise
 
 
 def fetch_new_signals(db: Client) -> list[dict[str, Any]]:
     """Open journal rows not yet claimed/skipped (copied_at still null)."""
-    result = (
-        db.table(TABLE)
-        .select("*")
-        .eq("status", "open")
-        .is_("mt5_ticket", "null")
-        .is_("copied_at", "null")
-        .order("created_at")
-        .execute()
-    )
+
+    def _run():
+        return (
+            db.table(TABLE)
+            .select("*")
+            .eq("status", "open")
+            .is_("mt5_ticket", "null")
+            .is_("copied_at", "null")
+            .order("created_at")
+            .execute()
+        )
+
+    result = _sb_call("fetch_new_signals", _run)
     return result.data or []
 
 
 def fetch_trade_by_id(db: Client, trade_id: str) -> dict[str, Any] | None:
-    result = db.table(TABLE).select("*").eq("id", trade_id).limit(1).execute()
+    result = _sb_call(
+        "fetch_trade_by_id",
+        lambda: db.table(TABLE).select("*").eq("id", trade_id).limit(1).execute(),
+    )
     rows = result.data or []
     return rows[0] if rows else None
 
@@ -135,8 +172,22 @@ def finalize_skip_signal(db: Client, trade: dict[str, Any], reason: str) -> None
     existing = (trade.get("mt5_error") or "").strip()
     if not existing:
         payload["mt5_error"] = reason[:500]
-    db.table(TABLE).update(payload).eq("id", trade_id).is_("mt5_ticket", "null").execute()
+    _sb_call(
+        "finalize_skip_signal",
+        lambda: db.table(TABLE)
+        .update(payload)
+        .eq("id", trade_id)
+        .is_("mt5_ticket", "null")
+        .execute(),
+    )
     log.warning("Skip %s (final): %s", trade_id, reason)
+    bot_events.emit(
+        "WARNING",
+        "preopen",
+        reason,
+        trade_id=str(trade_id),
+        data={"result": "SKIP", "reason": reason[:200]},
+    )
 
 
 def same_bar_open(db: Client, trade: dict[str, Any]) -> bool:
@@ -171,20 +222,27 @@ def fetch_open_copied(db: Client) -> list[dict[str, Any]]:
     left for resync, not the 5s loop.
     """
     cutoff = (datetime.now(DATE_TZ).date() - timedelta(days=TRACK_DAYS)).isoformat()
-    result = (
-        db.table(TABLE)
-        .select("*")
-        .gte("date_idt", cutoff)
-        .not_.is_("mt5_ticket", "null")
-        .is_("mt5_closed_at", "null")
-        .execute()
-    )
+
+    def _run():
+        return (
+            db.table(TABLE)
+            .select("*")
+            .gte("date_idt", cutoff)
+            .not_.is_("mt5_ticket", "null")
+            .is_("mt5_closed_at", "null")
+            .execute()
+        )
+
+    result = _sb_call("fetch_open_copied", _run)
     return result.data or []
 
 
 def update_trade(db: Client, trade_id: str, payload: dict[str, Any]) -> None:
     payload = {**payload, "updated_at": iso(utcnow())}
-    db.table(TABLE).update(payload).eq("id", trade_id).execute()
+    _sb_call(
+        "update_trade",
+        lambda: db.table(TABLE).update(payload).eq("id", trade_id).execute(),
+    )
 
 
 def claim_signal(db: Client, trade_id: str) -> bool:
@@ -194,13 +252,14 @@ def claim_signal(db: Client, trade_id: str) -> bool:
     eligible for fetch_new_signals retry.
     """
     now = iso(utcnow())
-    result = (
-        db.table(TABLE)
+    result = _sb_call(
+        "claim_signal",
+        lambda: db.table(TABLE)
         .update({"copied_at": now, "updated_at": now, "mt5_error": None})
         .eq("id", trade_id)
         .is_("mt5_ticket", "null")
         .is_("copied_at", "null")
-        .execute()
+        .execute(),
     )
     return bool(result.data)
 
@@ -363,6 +422,13 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                     pre.result,
                     trade_id,
                 )
+                bot_events.emit(
+                    "INFO",
+                    "preopen",
+                    f"shadow would {pre.result}",
+                    trade_id=str(trade_id),
+                    data={"result": pre.result, "mode": "shadow"},
+                )
             else:
                 finalize_skip_signal(db, trade, pre.reason or pre.result)
                 return
@@ -405,11 +471,25 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                         trade_id,
                         open_sl,
                     )
+            bot_events.emit(
+                "INFO",
+                "preopen",
+                "OPEN_LOCKED",
+                trade_id=str(trade_id),
+                data={"result": "OPEN_LOCKED", "lock_sl": pre.lock_sl, "open_locked": open_locked},
+            )
         elif pre.result == "OPEN_LOCKED" and preopen_mode == "shadow":
             log.info(
                 "PreOpen shadow would OPEN_LOCKED for %s (lock_sl=%s) — opening with journal stop",
                 trade_id,
                 pre.lock_sl,
+            )
+            bot_events.emit(
+                "INFO",
+                "preopen",
+                "shadow OPEN_LOCKED",
+                trade_id=str(trade_id),
+                data={"result": "OPEN_LOCKED", "mode": "shadow", "lock_sl": pre.lock_sl},
             )
 
     mult = lot_mult(trade.get("lot_mult"))
@@ -464,6 +544,13 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         # Release claim so fetch_new_signals can retry (copied_at must stay null).
         update_trade(db, trade_id, {"mt5_error": err, "copied_at": None})
         log.error("Open failed %s — released claim: %s", trade_id, err)
+        bot_events.emit(
+            "ERROR",
+            "error",
+            f"open failed: {err}",
+            trade_id=str(trade_id),
+            data={"error": err},
+        )
         return
 
     ticket = int(result.ticket or 0)
@@ -510,6 +597,20 @@ def open_signal(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         result.sl,
         result.tp,
         open_locked,
+    )
+    bot_events.emit(
+        "INFO",
+        "open",
+        f"opened ticket={ticket} fill={fill_price}",
+        trade_id=str(trade_id),
+        ticket=ticket,
+        data={
+            "fill": fill_price,
+            "sl": result.sl,
+            "tp": result.tp,
+            "open_locked": open_locked,
+            "volume": result.volume,
+        },
     )
 
 
@@ -593,6 +694,18 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                 getattr(pos, "sl", None),
                 getattr(pos, "tp", None),
             )
+            bot_events.emit(
+                "INFO",
+                "pine_exit_sync",
+                f"closing ticket={ticket} wait={pine_ago:.1f}s",
+                trade_id=str(trade["id"]),
+                ticket=ticket,
+                data={
+                    "pine_exit": trade.get("exit"),
+                    "pine_reason": trade.get("exit_reason"),
+                    "wait_sec": round(pine_ago, 1),
+                },
+            )
             if dry_run:
                 log.info("DRY_RUN would PINE_EXIT_SYNC close ticket=%s", ticket)
                 floating = round(float(pos.profit + pos.swap), 2)
@@ -600,6 +713,18 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                 return
 
             result = mt5.safe_close_position(ticket)
+            if (result.error or "") == "frozen_retry":
+                # 10029: leave position; broker may close via SL — retry next poll.
+                floating = round(float(pos.profit + pos.swap), 2)
+                update_trade(db, trade["id"], {"mt5_profit": floating})
+                bot_events.emit(
+                    "WARNING",
+                    "pine_exit_sync",
+                    "frozen_retry 10029",
+                    trade_id=str(trade["id"]),
+                    ticket=ticket,
+                )
+                return
             if not result.ok:
                 log.error(
                     "PINE_EXIT_SYNC close failed ticket=%s retcode=%s comment=%r error=%s",
@@ -607,6 +732,14 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
                     result.retcode,
                     result.comment,
                     result.error,
+                )
+                bot_events.emit(
+                    "ERROR",
+                    "error",
+                    f"PINE_EXIT_SYNC failed retcode={result.retcode}",
+                    trade_id=str(trade["id"]),
+                    ticket=ticket,
+                    data={"retcode": result.retcode, "error": result.error},
                 )
                 try:
                     update_trade(
@@ -697,68 +830,123 @@ def sync_trade(db: Client, mt5: MT5Client, trade: dict[str, Any]) -> None:
         profit,
         payload["mt5_closed_at"],
     )
+    bot_events.emit(
+        "INFO",
+        "close",
+        f"ticket={ticket} reason={exit_reason} profit={profit}",
+        trade_id=str(trade["id"]),
+        ticket=ticket,
+        data={
+            "exit": exit_price,
+            "profit": profit,
+            "mt5_exit_reason": exit_reason,
+            "closed_at": payload["mt5_closed_at"],
+        },
+    )
 
 
-def run_cycle(db: Client, mt5: MT5Client) -> None:
+def run_cycle(db: Client, mt5: MT5Client, *, last_step: list[str] | None = None) -> None:
+    def step(name: str) -> None:
+        if last_step is not None:
+            last_step[0] = name
+
+    step("ensure_connected")
     if not mt5.ensure_connected():
         log.error("Skipping cycle: MT5 is not connected")
         return
 
+    step("gann")
     try:
         sync_gann_levels(db, mt5)
     except Exception:
         log.exception("Gann level sync failed")
 
+    step("statics")
     try:
         sync_daily_statics(db)
     except Exception:
         log.exception("Daily statics sync failed")
 
-    new_signals = fetch_new_signals(db)
+    step("fetch_new_signals")
+    try:
+        new_signals = fetch_new_signals(db)
+    except Exception:
+        log.exception("fetch_new_signals failed — continuing cycle")
+        new_signals = []
     log.info("New signals: %s", len(new_signals))
     for trade in new_signals:
+        step(f"open:{trade.get('id')}")
         try:
             open_signal(db, mt5, trade)
         except Exception:
             log.exception("Failed to open trade %s", trade.get("id"))
+            bot_events.emit(
+                "ERROR",
+                "error",
+                "exception while opening",
+                trade_id=str(trade.get("id")) if trade.get("id") else None,
+            )
             try:
                 update_trade(db, trade["id"], {"mt5_error": "exception while opening, see bot log"})
             except Exception:
                 log.exception("Could not write mt5_error for %s", trade.get("id"))
 
-    open_copied = fetch_open_copied(db)
+    step("fetch_open_copied")
+    try:
+        open_copied = fetch_open_copied(db)
+    except Exception:
+        log.exception("fetch_open_copied failed — continuing cycle")
+        open_copied = []
     log.info("Open copied trades: %s", len(open_copied))
     dry_run = env_bool("DRY_RUN", False)
     for trade in open_copied:
+        tid = trade.get("id")
+        step(f"lock:{tid}")
         try:
             trade = manage_lock(
                 trade,
                 mt5,
-                update_trade=lambda tid, payload, _db=db: update_trade(_db, tid, payload),
+                update_trade=lambda tid_, payload, _db=db: update_trade(_db, tid_, payload),
                 dry_run=dry_run,
             )
+            step(f"sync:{tid}")
             sync_trade(db, mt5, trade)
         except Exception:
-            log.exception("Failed to sync/lock trade %s", trade.get("id"))
+            log.exception("Failed to sync/lock trade %s", tid)
+            bot_events.emit(
+                "ERROR",
+                "error",
+                "exception while sync/lock",
+                trade_id=str(tid) if tid else None,
+                ticket=int(trade["mt5_ticket"]) if trade.get("mt5_ticket") else None,
+            )
 
+    step("orphans")
     try:
         check_orphans(db, mt5)
     except Exception:
         log.exception("Orphan position check failed")
+    step("done")
 
 
 def main() -> None:
     load_dotenv()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    bot_dir = Path(__file__).resolve().parent
+    setup_logging(bot_dir)
+    commit = git_commit_short(bot_dir)
+    log.info(bot_start_banner(commit))
 
     poll_sec = env_float("POLL_SEC", 5)
     dry_run = env_bool("DRY_RUN", False)
+    slow_cycle_sec = env_float("SLOW_CYCLE_SEC", 15.0)
 
     db = connect_supabase()
+    bot_events.start(db)
+    try:
+        bot_events.purge_older_than(30)
+    except Exception:
+        log.debug("bot_events purge skipped", exc_info=True)
+
     session = SessionManager(magic=MAGIC)
     try:
         mt5 = session.open()
@@ -789,6 +977,20 @@ def main() -> None:
         symbol,
     )
 
+    # Resume: open copied trades continue lock/sync after restart.
+    try:
+        resume_n = len(fetch_open_copied(db))
+    except Exception:
+        resume_n = -1
+        log.exception("Resume open trades count failed")
+    log.info("Resume open trades: %s", resume_n if resume_n >= 0 else "?")
+    bot_events.emit(
+        "INFO",
+        "start",
+        f"commit={commit} resume_open={resume_n}",
+        data={"commit": commit, "poll_sec": poll_sec, "resume_open": resume_n},
+    )
+
     try:
         while True:
             log.info("Scan started")
@@ -796,17 +998,41 @@ def main() -> None:
                 mt5 = session.ensure()
             except MT5Error as exc:
                 log.error("MT5 session lost: %s", exc)
+                bot_events.emit("ERROR", "error", f"MT5 session lost: {exc}")
                 time.sleep(poll_sec)
                 continue
-            run_cycle(db, mt5)
+            last_step = ["start"]
+            t0 = time.monotonic()
+            try:
+                run_cycle(db, mt5, last_step=last_step)
+            except Exception:
+                log.exception("run_cycle crashed at step=%s", last_step[0])
+                bot_events.emit(
+                    "ERROR",
+                    "error",
+                    f"run_cycle crashed step={last_step[0]}",
+                    data={"step": last_step[0]},
+                )
+            elapsed = time.monotonic() - t0
+            if elapsed > slow_cycle_sec:
+                log.warning(
+                    "Slow cycle %.1fs step=%s",
+                    elapsed,
+                    last_step[0],
+                )
+                bot_events.emit(
+                    "WARNING",
+                    "slow_cycle",
+                    f"Slow cycle {elapsed:.1f}s step={last_step[0]}",
+                    data={"sec": round(elapsed, 2), "step": last_step[0]},
+                )
             # Local heartbeat for watchdog: fresh only after a completed cycle.
-            (Path(__file__).resolve().parent / "heartbeat.txt").write_text(
-                iso(utcnow()), encoding="utf-8"
-            )
+            (bot_dir / "heartbeat.txt").write_text(iso(utcnow()), encoding="utf-8")
             time.sleep(poll_sec)
     except KeyboardInterrupt:
         log.info("Stopped by user")
     finally:
+        bot_events.stop()
         session.close()
 
 

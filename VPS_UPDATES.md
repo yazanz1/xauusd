@@ -17,6 +17,17 @@
 
 ---
 
+## 2026-11-27 — לוג עמיד + 10029 + timeouts + bot_events (סעיף 9)
+
+- Commit: _(למלא אחרי commit/push)_
+- `safe_close_position`: retcode **10029** → `frozen_retry` (בלי `mt5_error`; retry בסבב הבא). 10036 נשאר `already_closed`.
+- לוג ראשי: `logs/bot.log` (`TimedRotatingFileHandler`, חצות, 14 יום). `httpx`/`httpcore` → WARNING. שורת `===== Bot start … commit=… =====` + `Resume open trades: N`.
+- טבלה `public.bot_events` + `bot_events.py` (תור ברקע). watchdog כותב `restart` עם `age=` / `StaleSec`.
+- `watchdog.ps1`: stderr/stdout מתוארכים תחת `logs/` (לא דורס); סיבוב `bot_err.log` ישן לפני restart; ניקוי stderr >14 יום.
+- Timeouts: `SUPABASE_TIMEOUT_SEC=10` (HTTP אמיתי). MT5 בלי threads — `MT5_SLOW_WARN_SEC=15` (WARNING בלבד). `bot_events` insert timeout 5s ברקע. `WARNING Slow cycle` אם סבב >`SLOW_CYCLE_SEC` (15).
+- **לא** השתנו: slip, לימיט, 40/30, `lot_mult`, `PINE_EXIT_SYNC_SEC`.
+- **VPS:** `git pull` + restart watchdog (כדי לטעון `watchdog.ps1` החדש). לוודא ש־`logs/` נוצר. אופציונלי ב־`.env`: `SUPABASE_TIMEOUT_SEC` / `MT5_SLOW_WARN_SEC` / `SLOW_CYCLE_SEC`. SQL כבר הוחל על הפרויקט (`sql/bot_events.sql`).
+
 ## ⭐ חשוב להשוואה — 2026-11-23 — preopen + PINE_EXIT_SYNC מהיר + סגירה בטוחה
 
 - Commit: `f855981`

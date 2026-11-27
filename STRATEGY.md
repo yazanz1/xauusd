@@ -100,13 +100,19 @@ MAGIC = `260860` (נפרד מפריצה `260831`).
 מהתאריך הזה: `exit` / `exit_reason` הם של ה-Pine. הביצוע בברוקר נמצא ב־`mt5_exit_reason`, `mt5_profit`, `mt5_closed_at`.  
 שורות בלי `mt5_ticket` תמיד היו ותמיד יישארו של ה-Pine.
 
-## Heartbeat + watchdog
+## Heartbeat + watchdog + לוג
 
-אחרי כל סבב מוצלח (`run_cycle`) הבוט כותב `heartbeat.txt` בתיקיית הפרויקט (חותמת UTC).  
+אחרי כל סבב (`run_cycle`) הבוט כותב `heartbeat.txt` בתיקיית הפרויקט (חותמת UTC).  
 `watchdog.ps1` בודק כל ~30 שניות: אם אין תהליך / הדופק ישן מ־90 שניות — מפעיל MT5 (אם צריך) ו־`python bot.py` מחדש.  
+בשורת restart: `age=<sec>` ו־`StaleSec`; גם שורת `restart` ל־`bot_events` (אם יש מפתח ב־`.env`).  
 `$BotDir` = תיקיית הסקריפט (`$PSScriptRoot`).  
 `$EntryScript` = נתיב **מלא** ל־`bot.py` (לא יחסי).  
-`Start-Bot` מפנה stdout/stderr ל־`bot_out.log` / `bot_err.log` (ברירת מחדל בריפו).  
+הלוג הראשי: `logs/bot.log` (`TimedRotatingFileHandler`, חצות, 14 ימים, append). בכל עלייה: `===== Bot start … commit=… =====` ו־`Resume open trades: N`.  
+`Start-Bot` מפנה stdout/stderr לקבצים **מתוארכים** תחת `logs/` (`stderr_YYYY-MM-DD_HHMMSS.log`) — לא דורס לוג קודם. לפני restart מסובב גם `bot_err.log`/`bot_out.log` ישנים אם נשארו.  
+אירועים חשובים (start/preopen/open/lock/close/pine_exit_sync/slow_cycle/timeout/error/restart) נכתבים ל־`public.bot_events` בתור ברקע; ניקוי >30 יום בעלייה.  
+Timeouts: `SUPABASE_TIMEOUT_SEC` (10) אמיתי ל־HTTP; MT5 בלי threads — רק `WARNING` אם קריאה >`MT5_SLOW_WARN_SEC` (15). `SLOW_CYCLE_SEC` (15) → `WARNING Slow cycle`.  
+`bot_events`: תור + thread, `put_nowait` (זריקה אם מלא), insert timeout 5s — הסבב הראשי לא מחכה.  
+`safe_close_position`: 10036 = כבר סגור; 10029 = קפוא ליד SL — בלי `mt5_error`, retry בסבב הבא.  
 Python: `WATCHDOG_PYTHON` ב־`.env`, אחרת `.venv\Scripts\python.exe`.  
 תיקונים מקומיים ל־VPS בלי להידרס ב־pull: `watchdog.local.ps1` — **רק משתנים** (`$Python`, `$StaleSec`).  
 סדר בטוח: קודם לוודא ש־`heartbeat.txt` מתעדכן, ורק אז `$StaleSec = 180` ב־local.  
@@ -166,6 +172,7 @@ python bot.py
 יומן העלאות מפורט ל־VPS (תאריך + מה השתנה): [VPS_UPDATES.md](VPS_UPDATES.md).  
 ⭐ חשוב להשוואה: cutover ל־wick 40/30 + `bot_lock_*` (2026-11-22); וגם 50/30→40/35 (2026-09-12).
 
+- **2026-11-27** — סעיף 9: `safe_close` מטפל ב־10029 כ־`frozen_retry` (בלי `mt5_error`). לוג עמיד ב־`logs/bot.log` + `bot_events` (תור/`put_nowait`/insert 5s); watchdog stderr מתוארך + `age=`/`StaleSec`. Timeout אמיתי רק ל־Supabase; MT5 — מדידת משך + WARNING בלי threads. `Slow cycle`; `Resume open trades`. בלי שינוי slip/לימיט/40/30/לוט.
 - **2026-11-23** — `preopen_check` לפני פתיחה (דילוג אם Pine כבר סיים / נעילה עברה; `OPEN_LOCKED` עם SL=30%, או סטופ מקורי אם `lock30` צפוף ל־stops). `copied_at` רק בהחלטה סופית / פתיחה מוצלחת; slip/`max_open` משאירים null. `m1_bars_since` כולל נר נוכחי. סגירה בטוחה (`safe_close_position`). `PINE_EXIT_SYNC_SEC` ברירת מחדל 3 מ־`updated_at`. שערי slip לא השתנו (VPS: `MAX_SLIP_STOP_FRAC=0.50`).
 - **2026-11-22** — `lot_mult`: הוובהוק שומר את השדה בכניסה (חסר → 1, אחרת תקרה 1 ורצפה 0.05). הבוט פותח `LOT_SIZE × lot_mult`. בלי השדה הלוט נשאר מלא. נעילה, סנכרון ו־`active_filters()` לא השתנו.
 - **2026-11-22** — Cutover ל־`wick_strategy` (+60): `TABLE=wick_strategy`, `MAGIC=260860`, נעילה 40/30 מיידית על M1 מ־`entry_time+5m` בעמודות `bot_lock_*` (בלי לכתוב `stop`); אם המחיר כבר עבר את ה־30% → סגירה בשוק כ־lock; `PINE_EXIT_SYNC`; `MAX_OPEN=6`. `active_filters()` תמיד `[]` (לא תלוי ב־`STRATEGY`). סליפג׳: `min(MAX_SLIP_USD, MAX_SLIP_STOP_FRAC×|entry−stop|)` (ברירות 1.5 / 0.20). לוג עלייה: `wick table=… magic=… filters=[]`.

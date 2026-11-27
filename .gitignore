@@ -11,7 +11,10 @@ sessions/**/*.json
 !sessions/.gitkeep
 bot.log
 *.log
+!logs/.gitkeep
 *.bak
 heartbeat.txt
 watchdog.local.ps1
 server_utc_offset.txt
+logs/*.log
+logs/bot.log*

@@ -8,6 +8,7 @@
 # Or set WATCHDOG_PYTHON=... in .env
 #
 # Do NOT put Redirect*/Start-Process logic in local — those live here as defaults.
+# Bot file log: logs/bot.log (TimedRotatingFileHandler). stderr here is crash-only.
 
 $BotDir = if ($PSScriptRoot) { $PSScriptRoot } else { "C:\bots\xauusd" }
 # Full path required: relative "bot.py" broke process detection (multiple bots).
@@ -16,12 +17,14 @@ $HeartbeatFile = Join-Path $BotDir "heartbeat.txt"
 $StaleSec = 90
 $CheckEverySec = 30
 $LogFile = Join-Path $BotDir "watchdog.log"
-$BotOutLog = Join-Path $BotDir "bot_out.log"
-$BotErrLog = Join-Path $BotDir "bot_err.log"
+$LogsDir = Join-Path $BotDir "logs"
+$StderrRetainDays = 14
 
 $EnvFile = Join-Path $BotDir ".env"
 $Mt5Path = $null
 $PythonFromEnv = $null
+$SupabaseUrl = $null
+$SupabaseKey = $null
 if (Test-Path $EnvFile) {
     Get-Content $EnvFile | ForEach-Object {
         if ($_ -match '^\s*MT5_PATH\s*=\s*(.+)\s*$') {
@@ -29,6 +32,12 @@ if (Test-Path $EnvFile) {
         }
         if ($_ -match '^\s*WATCHDOG_PYTHON\s*=\s*(.+)\s*$') {
             $PythonFromEnv = $Matches[1].Trim().Trim('"').Trim("'")
+        }
+        if ($_ -match '^\s*SUPABASE_URL\s*=\s*(.+)\s*$') {
+            $SupabaseUrl = $Matches[1].Trim().Trim('"').Trim("'")
+        }
+        if ($_ -match '^\s*SUPABASE_SERVICE_ROLE_KEY\s*=\s*(.+)\s*$') {
+            $SupabaseKey = $Matches[1].Trim().Trim('"').Trim("'")
         }
     }
 }
@@ -56,6 +65,61 @@ function Write-Log([string]$msg) {
     $line = "{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $msg
     Add-Content -Path $LogFile -Value $line -Encoding utf8
     Write-Host $line
+}
+
+function Ensure-LogsDir {
+    if (-not (Test-Path $LogsDir)) {
+        New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
+    }
+}
+
+function Get-HeartbeatAgeSec {
+    if (-not (Test-Path $HeartbeatFile)) { return $null }
+    $age = (Get-Date).ToUniversalTime() - (Get-Item $HeartbeatFile).LastWriteTimeUtc
+    return [math]::Round($age.TotalSeconds, 1)
+}
+
+function Rotate-StderrLog([string]$path) {
+    if (-not (Test-Path $path)) { return }
+    $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $dest = Join-Path $LogsDir ("stderr_{0}.log" -f $stamp)
+    try {
+        Move-Item -LiteralPath $path -Destination $dest -Force
+        Write-Log "Rotated stderr -> $dest"
+    } catch {
+        Write-Log "Could not rotate stderr: $_"
+    }
+}
+
+function Cleanup-OldStderr {
+    Ensure-LogsDir
+    $cutoff = (Get-Date).AddDays(-$StderrRetainDays)
+    Get-ChildItem -Path $LogsDir -Filter "stderr_*.log" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff } |
+        ForEach-Object {
+            try { Remove-Item -LiteralPath $_.FullName -Force } catch { }
+        }
+}
+
+function Emit-BotEventRestart([double]$ageSec) {
+    if (-not $SupabaseUrl -or -not $SupabaseKey) { return }
+    $uri = ($SupabaseUrl.TrimEnd('/') + "/rest/v1/bot_events")
+    $body = @{
+        level = "WARNING"
+        kind  = "restart"
+        msg   = ("heartbeat stale age={0}s StaleSec={1}" -f $ageSec, $StaleSec)
+        data  = @{ age = $ageSec; StaleSec = $StaleSec }
+    } | ConvertTo-Json -Compress
+    try {
+        Invoke-RestMethod -Method Post -Uri $uri -Body $body -ContentType "application/json" `
+            -Headers @{
+                apikey           = $SupabaseKey
+                Authorization    = "Bearer $SupabaseKey"
+                Prefer           = "return=minimal"
+            } -TimeoutSec 5 | Out-Null
+    } catch {
+        Write-Log "bot_events restart emit failed: $_"
+    }
 }
 
 function Get-BotProcesses {
@@ -92,6 +156,8 @@ function Ensure-Mt5 {
 
 function Start-Bot {
     Ensure-Mt5
+    Ensure-LogsDir
+    Cleanup-OldStderr
     $existing = @(Get-BotProcesses)
     if ($existing.Count -gt 0) {
         Write-Log "Bot already running (pids: $($existing.ProcessId -join ', '))"
@@ -101,18 +167,32 @@ function Start-Bot {
         Write-Log "Entry script missing: $EntryScript"
         return
     }
-    Write-Log "Starting bot: $Python $EntryScript (out=$BotOutLog err=$BotErrLog)"
-    # Redirect lives here (not overridable from local.ps1). Overwrites on each start.
+    $stamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $stderrPath = Join-Path $LogsDir ("stderr_{0}.log" -f $stamp)
+    $stdoutPath = Join-Path $LogsDir ("stdout_{0}.log" -f $stamp)
+    Write-Log "Starting bot: $Python $EntryScript (stdout=$stdoutPath stderr=$stderrPath)"
+    # Fresh dated stderr/stdout each start — never overwrite prior crash logs.
+    # Main application log is logs/bot.log written by the bot itself.
     Start-Process -FilePath $Python `
         -ArgumentList "`"$EntryScript`"" `
         -WorkingDirectory $BotDir `
-        -RedirectStandardOutput $BotOutLog `
-        -RedirectStandardError $BotErrLog `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
         -WindowStyle Minimized
 }
 
 function Restart-Bot {
-    Write-Log "Heartbeat stale or missing — restarting bot"
+    $age = Get-HeartbeatAgeSec
+    $ageTxt = if ($null -eq $age) { "missing" } else { "$age" }
+    Write-Log "Heartbeat stale or missing — restarting bot age=${ageTxt}s StaleSec=$StaleSec"
+    $ageNum = if ($null -eq $age) { [double]$StaleSec } else { [double]$age }
+    Emit-BotEventRestart $ageNum
+
+    # Preserve any leftover fixed-name err log from older watchdog versions.
+    Ensure-LogsDir
+    Rotate-StderrLog (Join-Path $BotDir "bot_err.log")
+    Rotate-StderrLog (Join-Path $BotDir "bot_out.log")
+
     Get-BotProcesses | ForEach-Object {
         Write-Log "Stopping pid $($_.ProcessId)"
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue

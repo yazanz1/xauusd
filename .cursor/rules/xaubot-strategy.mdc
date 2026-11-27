@@ -7,10 +7,10 @@ alwaysApply: true
 
 This project copies `wick_strategy` (+60) signals from Supabase (`pcieshmxxwplaodkrqet`) into MT5 (local or Windows VPS). MAGIC `260860`.
 
-Current rules (2026-11-23):
+Current rules (2026-11-27):
 
 - Poll every `POLL_SEC` seconds (default 5). Immediate scan on startup.
-- Startup log: `wick table=wick_strategy magic=260860 filters=[]`.
+- Startup log: `wick table=wick_strategy magic=260860 filters=[]` plus `===== Bot start … commit=… =====` and `Resume open trades: N`.
 - New signal = `status=open`, `mt5_ticket` null, and `copied_at` null. Market order only: long=BUY, short=SELL.
 - `TABLE=wick_strategy`, `MAGIC=260860` (breakout was gold_trades / 260831 — recover from git history if needed).
 - `active_filters()` always returns `[]` — Pine owns entry filters. Does not read `STRATEGY` from `.env`. Filter modules under `bot1_filters/` are kept but not loaded.
@@ -20,14 +20,15 @@ Current rules (2026-11-23):
 - SL/TP from the row at open (or lock SL on `OPEN_LOCKED`). Volume is `LOT_SIZE × lot_mult` (missing / invalid / 0 → 1; clamp to [0.05, 1]). Symbol from `MT5_SYMBOL`. `LOT_SIZE` in `.env` stays unchanged.
 - After fill: `mt5_ticket`, `copied_at`, `mt5_fill_price`, `bot_lock_state=none` (or `locked` if preopen), `orig_stop` (do not overwrite journal `entry`). Do not rely on journal `stop` after open (webhook may overwrite with lock_sl).
 - Lock 40/30 on `bot_lock_*` only (ignore webhook `lock_state`): M1 bars from `entry_time+5m`; on 40% hit → `set_sl` at 30% same poll (`LOCK_SL_FRAC` default 0.30). If price already past lock SL → market close as lock (`mt5_exit_reason=lock`). Never write journal `stop` on lock. Clamp ≥ `min_stop_distance×1.2`, never through `mt5_fill_price`.
-- Closes go through `safe_close_position` (no send if missing; treat retcode 10036 as already closed; in-memory per-ticket guard).
+- Closes go through `safe_close_position` (no send if missing; 10036=`already_closed`; 10029=`frozen_retry` — no `mt5_error`, retry next poll; in-memory per-ticket guard).
 - `PINE_EXIT_SYNC`: if journal `status=closed` and MT5 still open longer than `PINE_EXIT_SYNC_SEC` (default 3) since `updated_at`, and open age ≥ that window → market close.
 - Track copied rows with `mt5_ticket` set, `mt5_closed_at` null, and `date_idt` within 7 days — not by `status`.
 - On MT5 close write only `mt5_close_price`, `mt5_closed_at` (UTC), `mt5_profit`, `mt5_exit_reason`. Pine owns `status` / `exit` / `exit_reason` / `pips` / `usd_0_3`.
 - `deal.time` → UTC with whole-hour offset from `tick.time`, cached when tick stale. Refuse close without OUT deal for that position.
 - ORPHAN log for MAGIC positions outside track (do not auto-close).
 - After Israel 00:05, daily aggregates from `wick_strategy` → `gold_statics`. Gann → `gann_levels` (no opens from those rows).
-- Heartbeat + watchdog as before.
+- Logging: `logs/bot.log` (TimedRotatingFileHandler midnight, 14 days); `httpx`/`httpcore` at WARNING; key events → `bot_events` (background thread + queue, `put_nowait` drop if full, insert timeout 5s, purge >30d). Watchdog: dated `logs/stderr_*.log`, restart line includes `age=` + `StaleSec`, emits `restart` to `bot_events`.
+- Timeouts: real HTTP only — Supabase `SUPABASE_TIMEOUT_SEC` (default 10). MT5 is not wrapped in threads; `call_timed` only WARNs if slower than `MT5_SLOW_WARN_SEC` (default 15). Slow cycle WARNING if poll > `SLOW_CYCLE_SEC` (default 15).
 
 ## When the strategy changes
 
